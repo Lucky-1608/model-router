@@ -40,30 +40,41 @@ flowchart LR
   - Implemented `AES-256-GCM` two-tier envelope encryption (`EnvelopeEncryptor`), full credential CRUD & state machine (`ACTIVE`, `DISABLED`, `INVALID`, `COOLING_DOWN`, `TEMPORARILY_UNAVAILABLE`, `REQUIRES_ADMIN_ATTENTION`, `REVOKED`), 5 selection strategies (`ROUND_ROBIN`, `WEIGHTED`, `LEAST_ACTIVE`, `LEAST_RECENTLY_USED`, `RATE_LIMIT_AWARE`), hierarchical `QuotaManager` (`Credential`, `Workspace`, `Account`, `Model`, `Endpoint`, `Concurrency` filtered strictly by provider capability manifests), bounded exponential backoff with jitter (`RetryPolicyConfig`), RBAC-protected Admin APIs, and immutable audit logging.
   - **Verification Gate Passed**: 42 total tests passing, including cryptographic tamper detection, 429 cooldown coordination across shared `AccountGroup` workspaces, 401 auto-invalidation, non-retryable 400 checks, and secret redaction tests.
 
-### Phase 4 — Intelligent Routing
-- **Prompt 6 (Model Registry and Routing Engine)**:
-  - Implement `ModelRegistry` (manual registration + provider discovery sync, explicit `UNKNOWN` capability state), model aliases (`auto`, `fast`, `coding`, `reasoning`, `balanced`, `classification`, `summarization`, `speech`, `embedding`, `vision`), Stage 1 hard capability filter, Stage 2 configurable weighted scorer (`Quality 30%`, `Reliability 25%`, `Cost 20%`, `Latency 20%`, `Capacity 5%`), `RoutingDecisionTrace` explainability, and Routing API endpoints.
-  - **Verification Gate**: Deterministic routing test suite verifying capability filtering, policy weight changes, tie-breaking, and routing explanation traces.
+### Phase 4 — Intelligent Routing (Completed)
+- **Prompt 6 (Model Registry and Routing Engine — Completed)**:
+  - Implemented `ModelRegistry` (`src/gateway/model_registry/models.py`, `src/gateway/model_registry/registry.py`) with manual registration, provider discovery sync, explicit `UNKNOWN` capability state for unverified attributes, and all 10 semantic model aliases (`auto`, `fast`, `coding`, `reasoning`, `balanced`, `classification`, `summarization`, `speech`, `embedding`, `vision`).
+  - Implemented `RoutingPolicyEngine` (`src/gateway/routing_policy/models.py`, `src/gateway/routing_policy/engine.py`) with configurable weighted scoring (`Quality 30%`, `Reliability 25%`, `Cost 20%`, `Latency 20%`, `Capacity 5%` for `balanced`, plus `quality_first`, `cost_optimized`, `latency_optimized`, `reliability_first`, and custom policies).
+  - Implemented `RoutingEngine` (`src/gateway/routing_engine/models.py`, `src/gateway/routing_engine/engine.py`, `src/gateway/routing_engine/router.py`) with Stage 1 hard capability/constraint filtering, Stage 2 deterministic weighted candidate ranking, `RoutingDecisionTrace` explainability (`GET /api/v1/routing/explain/{id}`), and full integration with `/v1/chat/completions`, `/v1/embeddings`, and `/v1/models`.
+  - **Verification Gate Passed**: 48 total tests passing, including deterministic routing tests across all 10 aliases, Stage 1 capability/context/cost/provider filtering, Stage 2 policy weight switching, manual/discovery capability non-fabrication, and secret-free decision trace inspection.
 
-### Phase 5 — Tool Orchestration
-- **Prompt 7 (Universal Tool Gateway & MCP Integration)**:
-  - Implement `NormalizedToolCall` / `NormalizedToolResult`, Tool Registry, JSON Schema input validation, permission allowlists, SSRF-guarded webhook tools, bounded timeouts, multi-round tool execution loop, and official MCP SDK integration (server lifecycle, tool discovery, invocation, permissions).
-  - **Verification Gate**: Cross-provider tool-call normalization tests, multi-turn tool execution tests, MCP mock server integration tests, and security boundary tests.
+### Phase 5 — Tool Orchestration (Completed)
+- **Prompt 7 (Universal Tool Gateway & MCP Integration — Completed)**:
+  - Implemented `ToolRegistry`, `ToolGatewayOrchestrator`, and strict JSON Schema input validation (`src/gateway/tool_gateway/models.py`, `src/gateway/tool_gateway/validator.py`, `src/gateway/tool_gateway/registry.py`, `src/gateway/tool_gateway/orchestrator.py`, `src/gateway/tool_gateway/router.py`).
+  - Implemented `MCPClientManager` (`src/gateway/mcp_integration/models.py`, `src/gateway/mcp_integration/manager.py`, `src/gateway/mcp_integration/router.py`) supporting JSON-RPC 2.0 `initialize`, `tools/list`, and `tools/call` over HTTP/SSE/in-memory transports with `allowed_tools` / `blocked_tools` filtering, SSRF boundary enforcement, secret header redaction, and automatic synchronization into `ToolRegistry`.
+  - Enforced provider-native tool non-portability (`web_search_preview`, `file_search`, `computer_20250124`, `googleSearch`, etc.) and integrated multi-round autonomous tool execution (`X-Gateway-Tool-Mode: gateway_managed`) across unified endpoints.
+  - **Verification Gate Passed**: 52 total tests passing, including JSON Schema validation, SSRF protection, client & request tool allowlists, bounded execution timeouts, provider-native tool non-portability checks, MCP discovery/sync, and multi-turn MCP tool orchestration.
 
-### Phase 6 — Fallback and Observability
-- **Prompt 8 (Reliability and Fallback Engine)**:
-  - Implement per-provider/model/credential health checks, Redis-coordinated circuit breakers, `FallbackCompatibilityGuard` (enforcing mandatory capability parity and preventing mid-stream or non-idempotent replay), request cancellation propagation, and failure-injection tests.
-- **Prompt 9 (Usage Analytics and Observability)**:
-  - Implement TTFT & streaming duration measurement, token & USD cost estimation, OpenTelemetry tracing, Prometheus `/metrics`, redacted structured logging, and internal Analytics API endpoints.
-  - **Verification Gate**: Failure simulation tests, fallback invariant tests, and metrics/trace validation tests.
+### Phase 6 — Fallback and Observability (Completed)
+- **Prompt 8 (Reliability and Fallback Engine — Completed)**:
+  - Implemented per-provider, per-model, and per-credential Redis-coordinated circuit breakers (`CLOSED`, `OPEN`, `HALF_OPEN`) and EWMA latency/reliability updates in `HealthMonitor` (`src/gateway/health_monitor/models.py`, `src/gateway/health_monitor/monitor.py`).
+  - Implemented `FallbackCompatibilityGuard` (`src/gateway/retry_fallback/guard.py`) enforcing pre-first-byte streaming constraints (`bytes_sent_to_client == 0`), tool idempotency (`non_idempotent_tool_executed == False`), provider-native tool non-portability, and mandatory capability/context parity.
+  - Implemented `RetryFallbackEngine` (`src/gateway/retry_fallback/engine.py`) with multi-candidate fallback chains, circuit checks, credential rotation integration, and client cancellation propagation.
+- **Prompt 9 (Usage Analytics and Observability — Completed)**:
+  - Implemented `UsageTracker` (`src/gateway/usage_tracking/models.py`, `src/gateway/usage_tracking/tracker.py`) for request/stream/TTFT tracking, token/character aggregation, and verified USD cost estimation without fabricating unknown prices.
+  - Implemented `MetricsCollector` (`src/gateway/observability/metrics.py`), `TracingManager` with W3C `traceparent` propagation and attribute sanitization (`src/gateway/observability/tracing.py`), and `/metrics` + `/api/v1/analytics/*` endpoints (`src/gateway/observability/router.py`).
+  - **Verification Gate Passed**: 55 total tests passing (`pytest -v`), including circuit breaker state transitions (`CLOSED -> OPEN -> reset -> CLOSED`), `FallbackCompatibilityGuard` safety invariants, end-to-end fallback execution with `X-Gateway-Fallback-Used` and `X-Gateway-Attempts` headers, Prometheus metrics exposition, W3C trace propagation, and zero secret/prompt leakage in usage logs.
 
-### Phase 7 — Admin Dashboard
-- **Prompt 10 (Management Dashboard)**:
-  - Build Next.js + TypeScript + Tailwind CSS administrative dashboard covering all 12 views (Overview, Providers, Credentials, Models, Routing Policies, Client API Keys, Usage Analytics, Request Logs, Tool Registry, MCP Connections, Custom Integrations, System Settings) with RBAC and clear separation between live API data and demo/mock mode.
+### Phase 7 — Admin Dashboard (Completed)
+- **Prompt 10 (Management Dashboard — Completed)**:
+  - Implemented `AdminControlPlaneManager` (`src/gateway/admin_api/models.py`, `src/gateway/admin_api/manager.py`, `src/gateway/admin_api/router.py`) managing SHA-256-hashed Client Gateway API Keys (`ugw_live_...`), sanitized system settings (`GET /api/v1/admin/system/settings`), and unified dashboard control-plane snapshots (`GET /api/v1/admin/dashboard/summary`).
+  - Built the Next.js + TypeScript + Tailwind CSS Management Dashboard (`dashboard/`) implementing all 12 required operational views (`overview`, `providers`, `credentials`, `models`, `routing_policies`, `client_keys`, `analytics`, `request_logs`, `tools`, `mcp_servers`, `custom_integrations`, `system_settings`) with RBAC role switching (`SUPER_ADMIN`, `OPERATOR`, `READ_ONLY`), explicit `LIVE_BACKEND` vs `DEMO_FALLBACK` mode banners, and strict secret masking.
+  - **Verification Gate Passed**: 58 total tests passing (`pytest -v`), including client API key lifecycle, RBAC enforcement, one-time secret display, sanitized system settings, and Next.js 12-section integrity verification.
 
-### Phase 8 — Testing and Production Readiness
-- **Prompt 11 (Full System Testing & Audit)**:
-  - Execute unit, integration, end-to-end, concurrent load, failure-injection, and security audit suites. Produce `TEST_REPORT.md`, `SECURITY_AUDIT.md`, `PERFORMANCE_REPORT.md`, and `KNOWN_LIMITATIONS.md`.
+### Phase 8 — Testing and Production Readiness (Completed)
+- **Prompt 11 (Full System Testing & Audit — Completed)**:
+  - Implemented [`tests/test_system_audit_and_load.py`](file:///c:/Users/vuppa/Documents/projects/model-router/tests/test_system_audit_and_load.py) covering 30-worker concurrent load across shared `AccountGroup` credentials, zero leaked concurrency reservations, cascading multi-provider failure injection/recovery, and SSRF/RBAC/canary-secret non-leakage audits.
+  - Produced [`TEST_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/TEST_REPORT.md), [`SECURITY_AUDIT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/SECURITY_AUDIT.md), [`PERFORMANCE_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/PERFORMANCE_REPORT.md), and [`KNOWN_LIMITATIONS.md`](file:///c:/Users/vuppa/Documents/projects/model-router/KNOWN_LIMITATIONS.md).
+  - **Verification Gate Passed**: All 61 automated tests passing (`pytest -v`).
 
 ### Phase 9 — Documentation and Release
 - **Prompt 12 (Open-Source Release Preparation)**:

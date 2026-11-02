@@ -83,6 +83,14 @@ class InMemoryRedisFallback:
             self._kv[key] = (str(new_val), expires_at)
             return new_val
 
+    async def expire(self, key: str, seconds: int) -> bool:
+        async with self._lock:
+            if self._is_expired(key) or key not in self._kv:
+                return False
+            val, _ = self._kv[key]
+            self._kv[key] = (val, time.monotonic() + float(seconds))
+            return True
+
     async def hset(
         self,
         name: str,

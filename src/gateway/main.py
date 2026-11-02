@@ -6,7 +6,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from gateway.admin_api import AdminControlPlaneManager
 from gateway.api_gateway import RequestContextMiddleware, build_api_gateway_router
 from gateway.config import GatewaySettings, get_settings
 from gateway.core import (
@@ -18,7 +20,16 @@ from gateway.core import (
     register_exception_handlers,
 )
 from gateway.credential_manager import CredentialManager
+from gateway.health_monitor import HealthMonitor
+from gateway.mcp_integration import MCPClientManager
+from gateway.model_registry import ModelRegistry
+from gateway.observability import MetricsCollector, TracingManager
 from gateway.provider_registry import ProviderRegistry
+from gateway.retry_fallback import RetryFallbackEngine
+from gateway.routing_engine import RoutingEngine
+from gateway.routing_policy import RoutingPolicyEngine
+from gateway.tool_gateway import ToolGatewayOrchestrator, ToolRegistry
+from gateway.usage_tracking import UsageTracker
 
 
 def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
@@ -38,6 +49,41 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
         redis_manager=redis_manager,
         provider_registry=provider_registry,
     )
+    model_registry = ModelRegistry()
+    routing_policy_engine = RoutingPolicyEngine()
+    routing_engine = RoutingEngine(
+        model_registry=model_registry,
+        policy_engine=routing_policy_engine,
+        provider_registry=provider_registry,
+        credential_manager=credential_manager,
+    )
+    tool_registry = ToolRegistry(http_pool)
+    mcp_manager = MCPClientManager(http_pool=http_pool, tool_registry=tool_registry)
+    tool_orchestrator = ToolGatewayOrchestrator(tool_registry=tool_registry)
+    health_monitor = HealthMonitor(
+        redis_manager=redis_manager,
+        model_registry=model_registry,
+        provider_registry=provider_registry,
+    )
+    retry_fallback_engine = RetryFallbackEngine(
+        provider_registry=provider_registry,
+        model_registry=model_registry,
+        routing_engine=routing_engine,
+        health_monitor=health_monitor,
+        credential_manager=credential_manager,
+        tool_orchestrator=tool_orchestrator,
+    )
+    usage_tracker = UsageTracker(
+        db_manager=db_manager,
+        model_registry=model_registry,
+    )
+    admin_manager = AdminControlPlaneManager(
+        settings=settings,
+        db_manager=db_manager,
+        redis_manager=redis_manager,
+    )
+    metrics_collector = MetricsCollector()
+    tracing_manager = TracingManager()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -50,6 +96,8 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
         db_manager.init_engine()
         redis_manager.init_client()
         await credential_manager.ensure_tables()
+        await usage_tracker.ensure_tables()
+        await admin_manager.ensure_tables()
         await http_pool.get_client("default")
         await provider_registry.startup_all()
         try:
@@ -81,7 +129,26 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
     app.state.http_pool = http_pool
     app.state.provider_registry = provider_registry
     app.state.credential_manager = credential_manager
+    app.state.model_registry = model_registry
+    app.state.routing_policy_engine = routing_policy_engine
+    app.state.routing_engine = routing_engine
+    app.state.tool_registry = tool_registry
+    app.state.mcp_manager = mcp_manager
+    app.state.tool_orchestrator = tool_orchestrator
+    app.state.health_monitor = health_monitor
+    app.state.retry_fallback_engine = retry_fallback_engine
+    app.state.usage_tracker = usage_tracker
+    app.state.admin_manager = admin_manager
+    app.state.metrics_collector = metrics_collector
+    app.state.tracing_manager = tracing_manager
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(RequestContextMiddleware, version=settings.version)
     register_exception_handlers(app)
     app.include_router(build_api_gateway_router(api_v1_prefix=settings.api_v1_prefix))

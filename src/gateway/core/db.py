@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 import uuid
@@ -104,6 +105,17 @@ class DatabaseManager:
             self.init_engine()
         assert self._session_factory is not None
         return self._session_factory
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Async context manager yielding an AsyncSession that commits on success or rolls back on error."""
+        async with self.session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     async def get_session(self) -> AsyncIterator[AsyncSession]:
         """FastAPI dependency yielding a managed AsyncSession."""

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from gateway.core.canonical import NativePassthroughRequest
+from gateway.core.canonical import (
+    CanonicalInternalRequest,
+    NativePassthroughRequest,
+    TokenUsage,
+)
 from gateway.core.exceptions import UnsupportedCapabilityError
+from gateway.model_registry.registry import ModelRegistry
+from gateway.observability.metrics import MetricsCollector
+from gateway.observability.tracing import TracingManager
 from gateway.protocol_adapters.anthropic_protocol import (
     AnthropicMessagesProtocolAdapter,
 )
@@ -30,6 +36,12 @@ from gateway.protocol_adapters.openai_responses_protocol import (
     OpenAIResponsesProtocolAdapter,
 )
 from gateway.provider_registry.registry import ProviderRegistry
+from gateway.retry_fallback.engine import RetryFallbackEngine
+from gateway.routing_engine.engine import RoutingEngine
+from gateway.tool_gateway.models import ToolExecutionMode
+from gateway.tool_gateway.orchestrator import ToolGatewayOrchestrator
+from gateway.usage_tracking.models import UsageEventInput
+from gateway.usage_tracking.tracker import UsageTracker
 
 protocol_router = APIRouter(tags=["Universal Protocol Compatibility"])
 
@@ -44,6 +56,125 @@ def _get_registry(request: Request) -> ProviderRegistry:
     return request.app.state.provider_registry
 
 
+def _get_model_registry(request: Request) -> ModelRegistry:
+    return request.app.state.model_registry
+
+
+def _get_routing_engine(request: Request) -> RoutingEngine:
+    return request.app.state.routing_engine
+
+
+def _get_tool_orchestrator(request: Request) -> ToolGatewayOrchestrator:
+    return request.app.state.tool_orchestrator
+
+
+def _get_retry_fallback(request: Request) -> RetryFallbackEngine:
+    return request.app.state.retry_fallback_engine
+
+
+def _get_usage_tracker(request: Request) -> UsageTracker:
+    return request.app.state.usage_tracker
+
+
+def _get_metrics(request: Request) -> MetricsCollector:
+    return request.app.state.metrics_collector
+
+
+def _get_tracing(request: Request) -> TracingManager:
+    return request.app.state.tracing_manager
+
+
+def _extract_fallback_enabled(request: Request) -> bool:
+    raw = (request.headers.get("X-Gateway-Fallback") or "").strip().lower()
+    if raw in ("false", "0", "no", "off"):
+        return False
+    return True
+
+
+async def _record_gateway_usage(
+    request: Request,
+    *,
+    provider_id: str,
+    model_id: str,
+    protocol: str,
+    integration_mode: str = "unified",
+    stream: bool = False,
+    status_code: int = 200,
+    success: bool = True,
+    error_code: str | None = None,
+    attempt_count: int = 1,
+    fallback_used: bool = False,
+    primary_provider_id: str | None = None,
+    tool_rounds: int = 0,
+    usage: TokenUsage | None = None,
+    latency_ms: float = 0.0,
+    ttft_ms: float | None = None,
+    credential_id: str | None = None,
+    decision_id: str | None = None,
+) -> None:
+    req_id = getattr(request.state, "request_id", None) or request.headers.get(
+        "X-Request-ID", "req_unknown"
+    )
+    tok = usage or TokenUsage()
+    tracker = _get_usage_tracker(request)
+    metrics = _get_metrics(request)
+    rec = await tracker.record_usage(
+        UsageEventInput(
+            request_id=req_id,
+            decision_id=decision_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            credential_id=credential_id,
+            protocol=protocol,
+            integration_mode=integration_mode,
+            stream=stream,
+            status_code=status_code,
+            success=success,
+            error_code=error_code,
+            attempt_count=attempt_count,
+            fallback_used=fallback_used,
+            tool_rounds=tool_rounds,
+            usage=tok,
+            latency_ms=latency_ms,
+            ttft_ms=ttft_ms,
+        )
+    )
+    metrics.record_request(
+        provider_id=provider_id,
+        model_id=model_id,
+        protocol=protocol,
+        status=str(status_code),
+        latency_ms=latency_ms,
+        ttft_ms=ttft_ms,
+        input_tokens=tok.input_tokens,
+        output_tokens=tok.output_tokens,
+        cost_usd=rec.estimated_cost_usd,
+        fallback_used=fallback_used,
+        primary_provider_id=primary_provider_id,
+    )
+
+
+def _extract_tool_context(
+    request: Request,
+) -> tuple[ToolExecutionMode, set[str] | None, str | None, int | None]:
+    raw_mode = (request.headers.get("X-Gateway-Tool-Mode") or "").strip().lower()
+    mode = (
+        ToolExecutionMode.GATEWAY_MANAGED
+        if raw_mode == "gateway_managed"
+        else ToolExecutionMode.PASSTHROUGH
+    )
+    raw_allowed = (request.headers.get("X-Gateway-Allowed-Tools") or "").strip()
+    allowed_tools = (
+        {item.strip() for item in raw_allowed.split(",") if item.strip()}
+        if raw_allowed
+        else None
+    )
+    client_id = (request.headers.get("X-Gateway-Client-Id") or "").strip() or None
+    raw_rounds = (request.headers.get("X-Gateway-Max-Tool-Rounds") or "").strip()
+    max_rounds = int(raw_rounds) if raw_rounds.isdigit() else None
+    return mode, allowed_tools, client_id, max_rounds
+
+
 def _is_unified_mode_requested(
     request: Request, target_provider: str, native_provider: str
 ) -> bool:
@@ -51,8 +182,11 @@ def _is_unified_mode_requested(
 
     Uses native passthrough when the user calls a provider's native protocol for that provider,
     and uses normalization only when the user explicitly chooses the unified interface
-    (via X-Gateway-Mode: unified or by specifying a cross-provider model like 'anthropic/...').
+    (via X-Gateway-Mode: unified, X-Gateway-Tool-Mode: gateway_managed, or by specifying a cross-provider model).
     """
+    tool_mode = (request.headers.get("X-Gateway-Tool-Mode") or "").strip().lower()
+    if tool_mode == "gateway_managed":
+        return True
     mode_header = (request.headers.get("X-Gateway-Mode") or "").strip().lower()
     if mode_header == "unified":
         return True
@@ -66,107 +200,313 @@ def _is_unified_mode_requested(
     return target_provider != native_provider
 
 
+async def _resolve_via_routing_or_direct(
+    request: Request,
+    canonical_req: CanonicalInternalRequest,
+    default_provider: str = "openai",
+) -> tuple[str, str, str | None, bool]:
+    """Resolves (target_provider, clean_model, decision_id, routed_by_engine).
+
+    Uses RoutingEngine if the requested model is a semantic alias (e.g. 'auto', 'coding', 'fast')
+    or if X-Gateway-Policy / X-Gateway-Task headers are supplied.
+    """
+    model_registry = _get_model_registry(request)
+    routing_engine = _get_routing_engine(request)
+
+    policy_hdr = (request.headers.get("X-Gateway-Policy") or "").strip()
+    task_hdr = (request.headers.get("X-Gateway-Task") or "").strip()
+    if policy_hdr:
+        canonical_req.routing_policy_name = policy_hdr
+    if task_hdr:
+        canonical_req.task_hint = task_hdr
+
+    if (
+        model_registry.is_alias(canonical_req.requested_model)
+        or bool(policy_hdr)
+        or bool(task_hdr)
+    ):
+        trace = await routing_engine.route_canonical_request(canonical_req)
+        selected_meta = model_registry.get_model(trace.selected_model)
+        canonical_req.requested_model = selected_meta.provider_model_id
+        return (
+            trace.selected_provider,
+            selected_meta.provider_model_id,
+            trace.decision_id,
+            True,
+        )
+
+    target_provider, clean_model = resolve_target_provider_and_model(
+        canonical_req.requested_model, default_provider=default_provider
+    )
+    return target_provider, clean_model, None, False
+
+
 # =============================================================================
 # 1. OpenAI-Compatible Interface (/v1/chat/completions, /v1/embeddings, /v1/models)
 # =============================================================================
 @protocol_router.post("/v1/chat/completions", summary="OpenAI-Compatible Chat Completions")
 async def openai_chat_completions(request: Request) -> Response:
     registry = _get_registry(request)
+    tool_orchestrator = _get_tool_orchestrator(request)
+    retry_fallback = _get_retry_fallback(request)
+    tracing = _get_tracing(request)
     body_bytes = await request.body()
     payload = await request.json()
 
-    canonical_req = openai_chat_proto.parse_request(payload)
-    target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider="openai"
+    trace_id, parent_span = tracing.parse_traceparent(
+        request.headers.get("traceparent")
     )
+    req_start = time.perf_counter()
+
+    canonical_req = openai_chat_proto.parse_request(payload)
+    target_provider, clean_model, decision_id, routed_by_engine = (
+        await _resolve_via_routing_or_direct(
+            request, canonical_req, default_provider="openai"
+        )
+    )
+    tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    tool_orchestrator.prepare_request_tools(
+        canonical_req,
+        target_provider=target_provider,
+        mode=tool_mode,
+        allowed_tools=allowed_tools,
+        inject_gateway_tools=(
+            tool_mode == ToolExecutionMode.GATEWAY_MANAGED and not canonical_req.tools
+        ),
+    )
+
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
     credential = extract_request_credential(request, target_provider)
+    allow_fallback = _extract_fallback_enabled(request)
 
-    # Native passthrough if targeting OpenAI directly without unified mode override and non-streaming
+    # Native passthrough if targeting OpenAI directly without unified mode override, not routed by alias, and non-streaming
     if (
-        not _is_unified_mode_requested(request, target_provider, "openai")
+        not routed_by_engine
+        and not _is_unified_mode_requested(request, target_provider, "openai")
         and not canonical_req.stream
     ):
-        native_req = NativePassthroughRequest(
-            provider_id="openai",
-            method="POST",
-            upstream_path="/chat/completions",
-            headers=dict(request.headers),
-            body_bytes=body_bytes,
-        )
-        native_resp = await adapter.execute_native(native_req, credential=credential)
-        if native_resp.status_code >= 400:
-            adapter._raise_for_upstream_error(
-                native_resp.status_code, native_resp.headers, native_resp.body_bytes
-            )
-        return Response(
-            content=native_resp.body_bytes,
-            status_code=native_resp.status_code,
-            media_type="application/json",
-            headers={
-                "X-Gateway-Provider": target_provider,
-                "X-Gateway-Model": clean_model,
-                "X-Gateway-Mode": "native",
+        with tracing.start_span(
+            "ugw.request",
+            trace_id=trace_id,
+            parent_span_id=parent_span,
+            attributes={
+                "ugw.protocol": "openai_chat",
+                "ugw.mode": "native",
+                "ugw.provider": target_provider,
+                "ugw.model": clean_model,
             },
-        )
+        ):
+            native_req = NativePassthroughRequest(
+                provider_id="openai",
+                method="POST",
+                upstream_path="/chat/completions",
+                headers=dict(request.headers),
+                body_bytes=body_bytes,
+            )
+            native_resp = await adapter.execute_native(native_req, credential=credential)
+            if native_resp.status_code >= 400:
+                adapter._raise_for_upstream_error(
+                    native_resp.status_code, native_resp.headers, native_resp.body_bytes
+                )
+            lat_ms = round((time.perf_counter() - req_start) * 1000.0, 2)
+            await _record_gateway_usage(
+                request,
+                provider_id=target_provider,
+                model_id=clean_model,
+                protocol="openai_chat",
+                integration_mode="native",
+                status_code=native_resp.status_code,
+                latency_ms=lat_ms,
+                credential_id=credential.credential_id if credential else None,
+            )
+            return Response(
+                content=native_resp.body_bytes,
+                status_code=native_resp.status_code,
+                media_type="application/json",
+                headers={
+                    "X-Gateway-Provider": target_provider,
+                    "X-Gateway-Model": clean_model,
+                    "X-Gateway-Mode": "native",
+                    "X-Gateway-Trace-Id": trace_id,
+                },
+            )
 
     if canonical_req.stream:
-        stream_iter = adapter.execute_stream(canonical_req, credential)
+        stream_iter, sel_prov, sel_mod, attempts = (
+            await retry_fallback.execute_stream_resilient(
+                request=canonical_req,
+                primary_provider=target_provider,
+                primary_model=clean_model,
+                explicit_credential=credential,
+                decision_id=decision_id,
+                allow_fallback=allow_fallback,
+            )
+        )
+        ttft_val = attempts[-1].latency_ms if attempts else None
+        fb_used = len(attempts) > 1
+        await _record_gateway_usage(
+            request,
+            provider_id=sel_prov,
+            model_id=sel_mod,
+            protocol="openai_chat",
+            integration_mode="unified",
+            stream=True,
+            attempt_count=len(attempts),
+            fallback_used=fb_used,
+            primary_provider_id=target_provider,
+            latency_ms=ttft_val or 0.0,
+            ttft_ms=ttft_val,
+            decision_id=decision_id,
+        )
+        stream_headers: dict[str, str] = {
+            "X-Gateway-Provider": sel_prov,
+            "X-Gateway-Model": sel_mod,
+            "X-Gateway-Mode": "unified",
+            "X-Gateway-Attempts": str(len(attempts)),
+            "X-Gateway-Fallback-Used": str(fb_used).lower(),
+            "X-Gateway-Trace-Id": trace_id,
+        }
+        if decision_id:
+            stream_headers["X-Gateway-Route-Decision-Id"] = decision_id
         return StreamingResponse(
-            openai_chat_proto.format_stream_events(stream_iter, clean_model),
+            openai_chat_proto.format_stream_events(stream_iter, sel_mod),
             media_type="text/event-stream",
-            headers={
-                "X-Gateway-Provider": target_provider,
-                "X-Gateway-Model": clean_model,
-            },
+            headers=stream_headers,
         )
 
-    canonical_resp = await adapter.execute(canonical_req, credential)
+    with tracing.start_span(
+        "ugw.request",
+        trace_id=trace_id,
+        parent_span_id=parent_span,
+        attributes={
+            "ugw.protocol": "openai_chat",
+            "ugw.mode": "unified",
+            "ugw.primary_provider": target_provider,
+            "ugw.primary_model": clean_model,
+        },
+    ) as span:
+        outcome = await retry_fallback.execute_resilient(
+            request=canonical_req,
+            primary_provider=target_provider,
+            primary_model=clean_model,
+            explicit_credential=credential,
+            decision_id=decision_id,
+            allow_fallback=allow_fallback,
+            tool_mode=tool_mode,
+            client_id=client_id,
+            allowed_tools=allowed_tools,
+            max_tool_rounds=max_rounds,
+        )
+        canonical_resp = outcome.response
+        span.attributes["ugw.selected_provider"] = outcome.selected_provider
+        span.attributes["ugw.selected_model"] = outcome.selected_model
+        span.attributes["ugw.fallback_used"] = outcome.fallback_used
+        span.attributes["ugw.attempts"] = len(outcome.attempts)
+
+    tool_rounds = int(canonical_resp.provider_metadata.get("gateway_tool_rounds", 0))
+    await _record_gateway_usage(
+        request,
+        provider_id=outcome.selected_provider,
+        model_id=canonical_resp.model,
+        protocol="openai_chat",
+        integration_mode="unified",
+        stream=False,
+        status_code=200,
+        success=True,
+        attempt_count=len(outcome.attempts),
+        fallback_used=outcome.fallback_used,
+        primary_provider_id=target_provider,
+        tool_rounds=tool_rounds,
+        usage=canonical_resp.usage,
+        latency_ms=outcome.total_latency_ms,
+        credential_id=outcome.credential_id,
+        decision_id=decision_id,
+    )
+
     formatted = openai_chat_proto.format_response(canonical_resp)
+    resp_headers: dict[str, str] = {
+        "X-Gateway-Provider": outcome.selected_provider,
+        "X-Gateway-Model": canonical_resp.model,
+        "X-Gateway-Mode": "unified",
+        "X-Gateway-Attempts": str(len(outcome.attempts)),
+        "X-Gateway-Fallback-Used": str(outcome.fallback_used).lower(),
+        "X-Gateway-Trace-Id": trace_id,
+    }
+    if decision_id:
+        resp_headers["X-Gateway-Route-Decision-Id"] = decision_id
+    if tool_rounds > 0:
+        resp_headers["X-Gateway-Tool-Rounds"] = str(tool_rounds)
     return JSONResponse(
         content=formatted,
-        headers={
-            "X-Gateway-Provider": target_provider,
-            "X-Gateway-Model": canonical_resp.model,
-            "X-Gateway-Mode": "unified",
-        },
+        headers=resp_headers,
     )
 
 
 @protocol_router.post("/v1/embeddings", summary="OpenAI-Compatible Embeddings")
 async def openai_embeddings(request: Request) -> Response:
     registry = _get_registry(request)
+    retry_fallback = _get_retry_fallback(request)
     payload = await request.json()
     canonical_req = openai_chat_proto.parse_embeddings_request(payload)
-    target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider="openai"
+    target_provider, clean_model, decision_id, _ = await _resolve_via_routing_or_direct(
+        request, canonical_req, default_provider="openai"
     )
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
     credential = extract_request_credential(request, target_provider)
+    allow_fallback = _extract_fallback_enabled(request)
 
-    canonical_resp = await adapter.execute(canonical_req, credential)
-    formatted = openai_chat_proto.format_response(canonical_resp)
-    return JSONResponse(
-        content=formatted,
-        headers={
-            "X-Gateway-Provider": target_provider,
-            "X-Gateway-Model": clean_model,
-        },
+    outcome = await retry_fallback.execute_resilient(
+        request=canonical_req,
+        primary_provider=target_provider,
+        primary_model=clean_model,
+        explicit_credential=credential,
+        decision_id=decision_id,
+        allow_fallback=allow_fallback,
     )
+    canonical_resp = outcome.response
+    await _record_gateway_usage(
+        request,
+        provider_id=outcome.selected_provider,
+        model_id=canonical_resp.model,
+        protocol="openai_embeddings",
+        integration_mode="unified",
+        attempt_count=len(outcome.attempts),
+        fallback_used=outcome.fallback_used,
+        primary_provider_id=target_provider,
+        usage=canonical_resp.usage,
+        latency_ms=outcome.total_latency_ms,
+        credential_id=outcome.credential_id,
+        decision_id=decision_id,
+    )
+    formatted = openai_chat_proto.format_response(canonical_resp)
+    headers = {
+        "X-Gateway-Provider": outcome.selected_provider,
+        "X-Gateway-Model": canonical_resp.model,
+        "X-Gateway-Attempts": str(len(outcome.attempts)),
+        "X-Gateway-Fallback-Used": str(outcome.fallback_used).lower(),
+    }
+    if decision_id:
+        headers["X-Gateway-Route-Decision-Id"] = decision_id
+    return JSONResponse(content=formatted, headers=headers)
 
 
 @protocol_router.get("/v1/models", summary="OpenAI-Compatible Model Listing")
 async def openai_list_models(request: Request) -> dict[str, Any]:
     registry = _get_registry(request)
+    model_registry = _get_model_registry(request)
     data: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     created_ts = int(time.time())
+
+    # 1. Include provider-discovered cached models first (preserves dynamic discovery)
     for adapter in registry.list_adapters(enabled_only=True):
         cached = registry.get_cached_models(adapter.provider_id)
         for m in cached:
+            seen_ids.add(m.canonical_model_id)
             data.append(
                 {
                     "id": m.canonical_model_id,
@@ -179,6 +519,24 @@ async def openai_list_models(request: Request) -> dict[str, Any]:
                     "x_gateway_context_length": m.context_length,
                 }
             )
+
+    # 2. Include ModelRegistry models not already in cached discovery
+    for meta in model_registry.list_models(enabled_only=True):
+        if meta.model_id in seen_ids:
+            continue
+        seen_ids.add(meta.model_id)
+        data.append(
+            {
+                "id": meta.model_id,
+                "object": "model",
+                "created": created_ts,
+                "owned_by": meta.provider_id,
+                "x_gateway_capabilities": {
+                    k.value: v.value for k, v in meta.capabilities.items()
+                },
+                "x_gateway_context_length": meta.context_length,
+            }
+        )
     return {"object": "list", "data": data}
 
 
@@ -188,6 +546,8 @@ async def openai_list_models(request: Request) -> dict[str, Any]:
 @protocol_router.post("/v1/responses", summary="OpenAI Native Responses API")
 async def openai_responses_api(request: Request) -> Response:
     registry = _get_registry(request)
+    tool_orchestrator = _get_tool_orchestrator(request)
+    retry_fallback = _get_retry_fallback(request)
     body_bytes = await request.body()
     payload = await request.json()
 
@@ -195,10 +555,18 @@ async def openai_responses_api(request: Request) -> Response:
     target_provider, clean_model = resolve_target_provider_and_model(
         canonical_req.requested_model, default_provider="openai"
     )
+    tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    tool_orchestrator.prepare_request_tools(
+        canonical_req,
+        target_provider=target_provider,
+        mode=tool_mode,
+        allowed_tools=allowed_tools,
+    )
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
     credential = extract_request_credential(request, target_provider)
+    allow_fallback = _extract_fallback_enabled(request)
 
     if (
         not _is_unified_mode_requested(request, target_provider, "openai")
@@ -228,21 +596,60 @@ async def openai_responses_api(request: Request) -> Response:
         )
 
     if canonical_req.stream:
-        stream_iter = adapter.execute_stream(canonical_req, credential)
+        stream_iter, sel_prov, sel_mod, attempts = (
+            await retry_fallback.execute_stream_resilient(
+                request=canonical_req,
+                primary_provider=target_provider,
+                primary_model=clean_model,
+                explicit_credential=credential,
+                allow_fallback=allow_fallback,
+            )
+        )
         return StreamingResponse(
-            openai_responses_proto.format_stream_events(stream_iter, clean_model),
+            openai_responses_proto.format_stream_events(stream_iter, sel_mod),
             media_type="text/event-stream",
-            headers={"X-Gateway-Provider": target_provider, "X-Gateway-Model": clean_model},
+            headers={
+                "X-Gateway-Provider": sel_prov,
+                "X-Gateway-Model": sel_mod,
+                "X-Gateway-Attempts": str(len(attempts)),
+                "X-Gateway-Fallback-Used": str(len(attempts) > 1).lower(),
+            },
         )
 
-    canonical_resp = await adapter.execute(canonical_req, credential)
+    outcome = await retry_fallback.execute_resilient(
+        request=canonical_req,
+        primary_provider=target_provider,
+        primary_model=clean_model,
+        explicit_credential=credential,
+        allow_fallback=allow_fallback,
+        tool_mode=tool_mode,
+        client_id=client_id,
+        allowed_tools=allowed_tools,
+        max_tool_rounds=max_rounds,
+    )
+    canonical_resp = outcome.response
+    await _record_gateway_usage(
+        request,
+        provider_id=outcome.selected_provider,
+        model_id=canonical_resp.model,
+        protocol="openai_responses",
+        integration_mode="unified",
+        attempt_count=len(outcome.attempts),
+        fallback_used=outcome.fallback_used,
+        primary_provider_id=target_provider,
+        usage=canonical_resp.usage,
+        latency_ms=outcome.total_latency_ms,
+        credential_id=outcome.credential_id,
+    )
     formatted = openai_responses_proto.format_response(canonical_resp)
     return JSONResponse(
         content=formatted,
         headers={
-            "X-Gateway-Provider": target_provider,
+            "X-Gateway-Provider": outcome.selected_provider,
             "X-Gateway-Model": canonical_resp.model,
             "X-Gateway-Mode": "unified",
+            "X-Gateway-Attempts": str(len(outcome.attempts)),
+            "X-Gateway-Fallback-Used": str(outcome.fallback_used).lower(),
         },
     )
 
@@ -253,6 +660,8 @@ async def openai_responses_api(request: Request) -> Response:
 @protocol_router.post("/v1/messages", summary="Anthropic Native Messages API")
 async def anthropic_messages_api(request: Request) -> Response:
     registry = _get_registry(request)
+    tool_orchestrator = _get_tool_orchestrator(request)
+    retry_fallback = _get_retry_fallback(request)
     body_bytes = await request.body()
     payload = await request.json()
 
@@ -260,10 +669,18 @@ async def anthropic_messages_api(request: Request) -> Response:
     target_provider, clean_model = resolve_target_provider_and_model(
         canonical_req.requested_model, default_provider="anthropic"
     )
+    tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    tool_orchestrator.prepare_request_tools(
+        canonical_req,
+        target_provider=target_provider,
+        mode=tool_mode,
+        allowed_tools=allowed_tools,
+    )
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
     credential = extract_request_credential(request, target_provider)
+    allow_fallback = _extract_fallback_enabled(request)
 
     if (
         not _is_unified_mode_requested(request, target_provider, "anthropic")
@@ -293,21 +710,60 @@ async def anthropic_messages_api(request: Request) -> Response:
         )
 
     if canonical_req.stream:
-        stream_iter = adapter.execute_stream(canonical_req, credential)
+        stream_iter, sel_prov, sel_mod, attempts = (
+            await retry_fallback.execute_stream_resilient(
+                request=canonical_req,
+                primary_provider=target_provider,
+                primary_model=clean_model,
+                explicit_credential=credential,
+                allow_fallback=allow_fallback,
+            )
+        )
         return StreamingResponse(
-            anthropic_proto.format_stream_events(stream_iter, clean_model),
+            anthropic_proto.format_stream_events(stream_iter, sel_mod),
             media_type="text/event-stream",
-            headers={"X-Gateway-Provider": target_provider, "X-Gateway-Model": clean_model},
+            headers={
+                "X-Gateway-Provider": sel_prov,
+                "X-Gateway-Model": sel_mod,
+                "X-Gateway-Attempts": str(len(attempts)),
+                "X-Gateway-Fallback-Used": str(len(attempts) > 1).lower(),
+            },
         )
 
-    canonical_resp = await adapter.execute(canonical_req, credential)
+    outcome = await retry_fallback.execute_resilient(
+        request=canonical_req,
+        primary_provider=target_provider,
+        primary_model=clean_model,
+        explicit_credential=credential,
+        allow_fallback=allow_fallback,
+        tool_mode=tool_mode,
+        client_id=client_id,
+        allowed_tools=allowed_tools,
+        max_tool_rounds=max_rounds,
+    )
+    canonical_resp = outcome.response
+    await _record_gateway_usage(
+        request,
+        provider_id=outcome.selected_provider,
+        model_id=canonical_resp.model,
+        protocol="anthropic_messages",
+        integration_mode="unified",
+        attempt_count=len(outcome.attempts),
+        fallback_used=outcome.fallback_used,
+        primary_provider_id=target_provider,
+        usage=canonical_resp.usage,
+        latency_ms=outcome.total_latency_ms,
+        credential_id=outcome.credential_id,
+    )
     formatted = anthropic_proto.format_response(canonical_resp)
     return JSONResponse(
         content=formatted,
         headers={
-            "X-Gateway-Provider": target_provider,
+            "X-Gateway-Provider": outcome.selected_provider,
             "X-Gateway-Model": canonical_resp.model,
             "X-Gateway-Mode": "unified",
+            "X-Gateway-Attempts": str(len(outcome.attempts)),
+            "X-Gateway-Fallback-Used": str(outcome.fallback_used).lower(),
         },
     )
 
@@ -321,6 +777,8 @@ async def anthropic_messages_api(request: Request) -> Response:
 )
 async def gemini_native_api(request: Request, model_action: str) -> Response:
     registry = _get_registry(request)
+    tool_orchestrator = _get_tool_orchestrator(request)
+    retry_fallback = _get_retry_fallback(request)
     body_bytes = await request.body()
     payload = await request.json()
 
@@ -336,10 +794,18 @@ async def gemini_native_api(request: Request, model_action: str) -> Response:
     target_provider, clean_model = resolve_target_provider_and_model(
         canonical_req.requested_model, default_provider="gemini"
     )
+    tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    tool_orchestrator.prepare_request_tools(
+        canonical_req,
+        target_provider=target_provider,
+        mode=tool_mode,
+        allowed_tools=allowed_tools,
+    )
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
     credential = extract_request_credential(request, target_provider)
+    allow_fallback = _extract_fallback_enabled(request)
 
     if (
         not _is_unified_mode_requested(request, target_provider, "gemini")
@@ -370,21 +836,60 @@ async def gemini_native_api(request: Request, model_action: str) -> Response:
         )
 
     if is_stream:
-        stream_iter = adapter.execute_stream(canonical_req, credential)
+        stream_iter, sel_prov, sel_mod, attempts = (
+            await retry_fallback.execute_stream_resilient(
+                request=canonical_req,
+                primary_provider=target_provider,
+                primary_model=clean_model,
+                explicit_credential=credential,
+                allow_fallback=allow_fallback,
+            )
+        )
         return StreamingResponse(
-            gemini_proto.format_stream_events(stream_iter, clean_model),
+            gemini_proto.format_stream_events(stream_iter, sel_mod),
             media_type="text/event-stream",
-            headers={"X-Gateway-Provider": target_provider, "X-Gateway-Model": clean_model},
+            headers={
+                "X-Gateway-Provider": sel_prov,
+                "X-Gateway-Model": sel_mod,
+                "X-Gateway-Attempts": str(len(attempts)),
+                "X-Gateway-Fallback-Used": str(len(attempts) > 1).lower(),
+            },
         )
 
-    canonical_resp = await adapter.execute(canonical_req, credential)
+    outcome = await retry_fallback.execute_resilient(
+        request=canonical_req,
+        primary_provider=target_provider,
+        primary_model=clean_model,
+        explicit_credential=credential,
+        allow_fallback=allow_fallback,
+        tool_mode=tool_mode,
+        client_id=client_id,
+        allowed_tools=allowed_tools,
+        max_tool_rounds=max_rounds,
+    )
+    canonical_resp = outcome.response
+    await _record_gateway_usage(
+        request,
+        provider_id=outcome.selected_provider,
+        model_id=canonical_resp.model,
+        protocol="gemini_native",
+        integration_mode="unified",
+        attempt_count=len(outcome.attempts),
+        fallback_used=outcome.fallback_used,
+        primary_provider_id=target_provider,
+        usage=canonical_resp.usage,
+        latency_ms=outcome.total_latency_ms,
+        credential_id=outcome.credential_id,
+    )
     formatted = gemini_proto.format_response(canonical_resp)
     return JSONResponse(
         content=formatted,
         headers={
-            "X-Gateway-Provider": target_provider,
+            "X-Gateway-Provider": outcome.selected_provider,
             "X-Gateway-Model": canonical_resp.model,
             "X-Gateway-Mode": "unified",
+            "X-Gateway-Attempts": str(len(outcome.attempts)),
+            "X-Gateway-Fallback-Used": str(outcome.fallback_used).lower(),
         },
     )
 
@@ -558,4 +1063,3 @@ async def explicit_native_passthrough(
             "X-Gateway-Mode": "native",
         },
     )
-
