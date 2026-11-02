@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ugw-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ugw_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ugw_password}
+      POSTGRES_DB: ${POSTGRES_DB:-universal_ai_gateway}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ugw_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ugw_user} -d ${POSTGRES_DB:-universal_ai_gateway}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ugw-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ugw_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ugw-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.example
+    environment:
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://ugw_user:ugw_password@postgres:5432/universal_ai_gateway
+      GATEWAY_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    stop_grace_period: 30s
+
+volumes:
+  ugw_pgdata:
+  ugw_redisdata:
+

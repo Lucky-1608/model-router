@@ -20,11 +20,11 @@ flowchart LR
 
 ## 2. Detailed Phase Breakdown & Verification Gates
 
-### Phase 1 — Architecture and Repository Foundation
+### Phase 1 — Architecture and Repository Foundation (Completed)
 - **Prompt 1 (Completed)**: Comprehensive architectural design (`ARCHITECTURE.md`, `TECHNICAL_SPECIFICATION.md`, `MODULE_DESIGN.md`, `API_DESIGN.md`, `SECURITY_DESIGN.md`, `IMPLEMENTATION_ROADMAP.md`).
-- **Prompt 2 (Next)**:
-  - Initialize `pyproject.toml`, module package skeletons under `src/gateway/`, Pydantic settings (`src/gateway/config/`), SQLAlchemy 2.0 async engine & Alembic migrations, Redis async client pool, HTTPX client pool manager, `structlog` with secret redaction, centralized exception handling, API versioning, `/health/live` and `/health/ready` endpoints, Dockerfile, `docker-compose.yml`, `.env.example`, `.gitignore`, `README.md`, and `CONTRIBUTING.md`.
-  - **Verification Gate**: `pytest` passes startup, DB connectivity, Redis connectivity, health endpoint, and settings validation tests; application boots cleanly locally.
+- **Prompt 2 (Completed)**:
+  - Initialized `pyproject.toml`, module package skeletons under `src/gateway/`, Pydantic settings (`src/gateway/config/`), SQLAlchemy 2.0 async engine & Alembic migrations, Redis async client pool with fail-open / memory fallback, HTTPX client pool manager with explicit four-phase timeouts, `structlog` with mandatory secret redaction, centralized exception handling, API versioning, `/health/live` and `/health/ready` endpoints, Dockerfile, `docker-compose.yml`, `.env.example`, `.gitignore`, `README.md`, and `CONTRIBUTING.md`.
+  - **Verification Gate Passed**: `pytest` passed all 18 tests covering startup, DB connectivity, Redis connectivity, health/readiness endpoints, HTTPX connection pool management, secret redaction, and settings validation.
 
 ### Phase 2 — Provider and Protocol Infrastructure
 - **Prompt 3 (Provider Plugin Architecture)**:
