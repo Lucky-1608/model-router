@@ -26,19 +26,19 @@ flowchart LR
   - Initialized `pyproject.toml`, module package skeletons under `src/gateway/`, Pydantic settings (`src/gateway/config/`), SQLAlchemy 2.0 async engine & Alembic migrations, Redis async client pool with fail-open / memory fallback, HTTPX client pool manager with explicit four-phase timeouts, `structlog` with mandatory secret redaction, centralized exception handling, API versioning, `/health/live` and `/health/ready` endpoints, Dockerfile, `docker-compose.yml`, `.env.example`, `.gitignore`, `README.md`, and `CONTRIBUTING.md`.
   - **Verification Gate Passed**: `pytest` passed all 18 tests covering startup, DB connectivity, Redis connectivity, health/readiness endpoints, HTTPX connection pool management, secret redaction, and settings validation.
 
-### Phase 2 — Provider and Protocol Infrastructure
-- **Prompt 3 (Provider Plugin Architecture)**:
-  - Implement `BaseProviderAdapter`, `ProviderRegistry`, capability manifests, error classification, usage extraction, and custom adapter registration.
-  - Implement initial verified adapters: **OpenAI**, **Anthropic**, **Google Gemini**, **OpenRouter**, **Groq**, **Ollama**, and **ElevenLabs**.
-  - **Verification Gate**: Mocked HTTPX (`respx`) integration tests for every adapter covering auth, discovery, execution, streaming, rate-limit extraction, and error classification.
-- **Prompt 4 (Universal Protocol Compatibility)**:
-  - Implement protocol adapters for OpenAI Chat Completions, OpenAI Embeddings, OpenAI Responses API, Anthropic Messages API, Google Gemini Native API, ElevenLabs Native Audio API, and Custom REST Protocol plugins, plus Native Passthrough routing.
-  - **Verification Gate**: Protocol compatibility tests verifying lossless native passthrough, accurate unified normalization, SSE streaming fidelity, and explicit rejection of unsupported provider capabilities.
+### Phase 2 — Provider and Protocol Infrastructure (Completed)
+- **Prompt 3 (Provider Plugin Architecture — Completed)**:
+  - Implemented `BaseProviderAdapter`, `ProviderRegistry`, capability manifests (`SUPPORTED` / `UNSUPPORTED` / `UNKNOWN`), error classification, usage/rate-limit extraction, and custom adapter registration with SSRF guards.
+  - Implemented initial verified adapters: **OpenAI**, **Anthropic**, **Google Gemini**, **OpenRouter**, **Groq**, **Ollama**, and **ElevenLabs**.
+  - **Verification Gate Passed**: Mocked HTTPX (`respx`) integration tests for every adapter covering auth, discovery, execution, streaming, rate-limit extraction, and error classification.
+- **Prompt 4 (Universal Protocol Compatibility — Completed)**:
+  - Implemented protocol adapters for OpenAI Chat Completions, OpenAI Embeddings, OpenAI Responses API (`/v1/responses`), Anthropic Messages API (`/v1/messages`), Google Gemini Native API (`/v1beta/models/...`), ElevenLabs Native Audio API (`/v1/text-to-speech`, `/v1/speech-to-text`, `/v1/voices`), and Custom REST Protocol plugins (`/v1/custom/{provider_id}`), plus explicit Native Passthrough (`/v1/native/{provider_id}/{path}`).
+  - **Verification Gate Passed**: 37 total tests passing, including protocol compatibility tests verifying lossless native passthrough, accurate unified normalization, SSE streaming fidelity, and explicit `422 GW_UNSUPPORTED_CAPABILITY` rejection of unsupported provider capabilities or non-portable fields.
 
-### Phase 3 — Credential Management
-- **Prompt 5 (Multi-Key Credential Manager)**:
-  - Implement `AES-256-GCM` envelope encryption, credential CRUD & state machine (`ACTIVE`, `DISABLED`, `INVALID`, `COOLING_DOWN`, `TEMPORARILY_UNAVAILABLE`, `REQUIRES_ADMIN_ATTENTION`), selection strategies (`ROUND_ROBIN`, `WEIGHTED`, `LEAST_ACTIVE`, `LRU`, `RATE_LIMIT_AWARE`), hierarchical quota manager (`Credential`, `Workspace`, `AccountGroup`, `Model`, `Concurrency`) backed by atomic Redis Lua scripts, bounded exponential backoff with jitter, and audit logging.
-  - **Verification Gate**: Multi-worker concurrency tests, 429 cooldown tests, shared account-group quota exhaustion tests, and secret redaction tests.
+### Phase 3 — Credential Management (Completed)
+- **Prompt 5 (Multi-Key Credential Manager — Completed)**:
+  - Implemented `AES-256-GCM` two-tier envelope encryption (`EnvelopeEncryptor`), full credential CRUD & state machine (`ACTIVE`, `DISABLED`, `INVALID`, `COOLING_DOWN`, `TEMPORARILY_UNAVAILABLE`, `REQUIRES_ADMIN_ATTENTION`, `REVOKED`), 5 selection strategies (`ROUND_ROBIN`, `WEIGHTED`, `LEAST_ACTIVE`, `LEAST_RECENTLY_USED`, `RATE_LIMIT_AWARE`), hierarchical `QuotaManager` (`Credential`, `Workspace`, `Account`, `Model`, `Endpoint`, `Concurrency` filtered strictly by provider capability manifests), bounded exponential backoff with jitter (`RetryPolicyConfig`), RBAC-protected Admin APIs, and immutable audit logging.
+  - **Verification Gate Passed**: 42 total tests passing, including cryptographic tamper detection, 429 cooldown coordination across shared `AccountGroup` workspaces, 401 auto-invalidation, non-retryable 400 checks, and secret redaction tests.
 
 ### Phase 4 — Intelligent Routing
 - **Prompt 6 (Model Registry and Routing Engine)**:

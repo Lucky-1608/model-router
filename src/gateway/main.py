@@ -17,6 +17,8 @@ from gateway.core import (
     get_logger,
     register_exception_handlers,
 )
+from gateway.credential_manager import CredentialManager
+from gateway.provider_registry import ProviderRegistry
 
 
 def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
@@ -28,6 +30,14 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
     db_manager = DatabaseManager(settings)
     redis_manager = RedisManager(settings)
     http_pool = HTTPXClientPoolManager(settings)
+    provider_registry = ProviderRegistry(http_pool)
+    provider_registry.register_builtin_adapters()
+    credential_manager = CredentialManager(
+        settings=settings,
+        db_manager=db_manager,
+        redis_manager=redis_manager,
+        provider_registry=provider_registry,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -39,11 +49,14 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
         )
         db_manager.init_engine()
         redis_manager.init_client()
+        await credential_manager.ensure_tables()
         await http_pool.get_client("default")
+        await provider_registry.startup_all()
         try:
             yield
         finally:
             logger.info("gateway_shutting_down")
+            await provider_registry.shutdown_all()
             await http_pool.aclose_all()
             await redis_manager.close()
             await db_manager.dispose()
@@ -66,6 +79,8 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
     app.state.db_manager = db_manager
     app.state.redis_manager = redis_manager
     app.state.http_pool = http_pool
+    app.state.provider_registry = provider_registry
+    app.state.credential_manager = credential_manager
 
     app.add_middleware(RequestContextMiddleware, version=settings.version)
     register_exception_handlers(app)
@@ -75,4 +90,3 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
 
 
 app = create_app()
-
