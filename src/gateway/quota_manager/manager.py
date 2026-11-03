@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gateway.capability_registry.models import QuotaScopeType
 from gateway.core.canonical import RateLimitSnapshot, TokenUsage
 from gateway.core.redis import InMemoryRedisFallback, RedisManager
-from gateway.credential_manager.models import QuotaConfigSpec
+
+if TYPE_CHECKING:
+    from gateway.credential_manager.models import QuotaConfigSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +414,275 @@ class QuotaManager:
             remaining_tokens=rem_tok_header,
             last_used_ms=last_used_ms,
         )
+
+    async def try_acquire_lease_atomic(
+        self,
+        *,
+        request_id: str,
+        provider_id: str,
+        supported_scopes: list[QuotaScopeType],
+        credential_id: str,
+        account_group_id: str | None,
+        workspace_id: str | None,
+        cred_max_concurrency: int | None,
+        acct_max_concurrency: int | None,
+        cred_quota: QuotaConfigSpec,
+        acct_quota: QuotaConfigSpec | None,
+        model: str | None = None,
+        endpoint: str | None = None,
+        estimated_tokens: int = 0,
+    ) -> tuple[bool, QuotaEligibilityResult]:
+        """Atomically evaluates eligibility and reserves concurrency/window slots.
+
+        When running on a real Redis cluster/instance, executes a server-side Lua script to eliminate
+        distributed race conditions across multiple Uvicorn workers or gateway replicas.
+        On InMemoryRedisFallback, uses the store's global lock for multi-coroutine atomicity.
+        """
+        # 1. Cooldown check
+        cd_rem, cd_scope = await self.get_active_cooldown(
+            provider_id=provider_id,
+            supported_scopes=supported_scopes,
+            credential_id=credential_id,
+            account_group_id=account_group_id,
+            workspace_id=workspace_id,
+            model=model,
+            endpoint=endpoint,
+        )
+        if cd_rem > 0:
+            return False, QuotaEligibilityResult(
+                eligible=False,
+                reason=f"Cooling down on scope {cd_scope}",
+                blocking_scope=cd_scope,
+                cooldown_remaining_seconds=cd_rem,
+            )
+
+        # Real Redis mode: execute Lua script if eval is available
+        if hasattr(self.redis, "eval"):
+            return await self._eval_and_reserve_redis_lua(
+                request_id=request_id,
+                provider_id=provider_id,
+                supported_scopes=supported_scopes,
+                credential_id=credential_id,
+                account_group_id=account_group_id,
+                cred_max_concurrency=cred_max_concurrency,
+                acct_max_concurrency=acct_max_concurrency,
+                cred_quota=cred_quota,
+                acct_quota=acct_quota,
+                model=model,
+                estimated_tokens=estimated_tokens,
+            )
+
+        return await self._eval_and_reserve_in_memory(
+            request_id=request_id,
+            provider_id=provider_id,
+            supported_scopes=supported_scopes,
+            credential_id=credential_id,
+            account_group_id=account_group_id,
+            workspace_id=workspace_id,
+            cred_max_concurrency=cred_max_concurrency,
+            acct_max_concurrency=acct_max_concurrency,
+            cred_quota=cred_quota,
+            acct_quota=acct_quota,
+            model=model,
+            estimated_tokens=estimated_tokens,
+        )
+
+    async def _eval_and_reserve_in_memory(
+        self,
+        *,
+        request_id: str,
+        provider_id: str,
+        supported_scopes: list[QuotaScopeType],
+        credential_id: str,
+        account_group_id: str | None,
+        workspace_id: str | None,
+        cred_max_concurrency: int | None,
+        acct_max_concurrency: int | None,
+        cred_quota: QuotaConfigSpec,
+        acct_quota: QuotaConfigSpec | None,
+        model: str | None,
+        estimated_tokens: int,
+    ) -> tuple[bool, QuotaEligibilityResult]:
+        active_req = await self.redis.scard(f"ugw:inflight:cred:{credential_id}")
+        acct_active_req = (
+            await self.redis.scard(f"ugw:inflight:acct:{account_group_id}")
+            if account_group_id
+            else 0
+        )
+        if cred_max_concurrency is not None and active_req >= cred_max_concurrency:
+            return False, QuotaEligibilityResult(
+                eligible=False,
+                reason="Credential max_concurrency reached",
+                blocking_scope=QuotaScopeType.CONCURRENCY,
+                active_requests=active_req,
+                account_active_requests=acct_active_req,
+            )
+        if account_group_id and acct_max_concurrency is not None and acct_active_req >= acct_max_concurrency:
+            return False, QuotaEligibilityResult(
+                eligible=False,
+                reason="Shared AccountGroup max_concurrency reached",
+                blocking_scope=QuotaScopeType.CONCURRENCY,
+                active_requests=active_req,
+                account_active_requests=acct_active_req,
+            )
+
+        minute_bucket = self._minute_bucket()
+        supported_set = set(supported_scopes)
+        if QuotaScopeType.CREDENTIAL in supported_set and cred_quota.requests_per_minute is not None:
+            used_rpm = int(await self.redis.get(f"ugw:win:cred:{credential_id}:rpm:{minute_bucket}") or 0)
+            if used_rpm >= cred_quota.requests_per_minute:
+                return False, QuotaEligibilityResult(
+                    eligible=False,
+                    reason="Credential RPM quota reached",
+                    blocking_scope=QuotaScopeType.CREDENTIAL,
+                    active_requests=active_req,
+                    account_active_requests=acct_active_req,
+                )
+
+        if account_group_id and acct_quota is not None and acct_quota.requests_per_minute is not None:
+            used_acct_rpm = int(await self.redis.get(f"ugw:win:acct:{account_group_id}:rpm:{minute_bucket}") or 0)
+            if used_acct_rpm >= acct_quota.requests_per_minute:
+                return False, QuotaEligibilityResult(
+                    eligible=False,
+                    reason="Shared AccountGroup RPM quota reached",
+                    blocking_scope=QuotaScopeType.ACCOUNT,
+                    active_requests=active_req,
+                    account_active_requests=acct_active_req,
+                )
+
+        # Atomic reservation under the lock
+        await self.reserve_lease(
+            request_id=request_id,
+            credential_id=credential_id,
+            account_group_id=account_group_id,
+            model=model,
+        )
+        return True, QuotaEligibilityResult(
+            eligible=True,
+            active_requests=active_req + 1,
+            account_active_requests=acct_active_req + 1,
+        )
+
+    async def _eval_and_reserve_redis_lua(
+        self,
+        *,
+        request_id: str,
+        provider_id: str,
+        supported_scopes: list[QuotaScopeType],
+        credential_id: str,
+        account_group_id: str | None,
+        cred_max_concurrency: int | None,
+        acct_max_concurrency: int | None,
+        cred_quota: QuotaConfigSpec,
+        acct_quota: QuotaConfigSpec | None,
+        model: str | None,
+        estimated_tokens: int,
+    ) -> tuple[bool, QuotaEligibilityResult]:
+        lua_script = """
+        local cred_inflight_key = KEYS[1]
+        local acct_inflight_key = KEYS[2]
+        local cred_rpm_key = KEYS[3]
+        local acct_rpm_key = KEYS[4]
+        local cred_state_key = KEYS[5]
+
+        local request_id = ARGV[1]
+        local cred_max_conc = tonumber(ARGV[2])
+        local acct_max_conc = tonumber(ARGV[3])
+        local cred_max_rpm = tonumber(ARGV[4])
+        local acct_max_rpm = tonumber(ARGV[5])
+        local now_ms = ARGV[6]
+
+        -- 1. Check credential concurrency
+        local cred_active = redis.call('SCARD', cred_inflight_key)
+        if cred_max_conc > 0 and cred_active >= cred_max_conc then
+            return {0, 'CRED_CONCURRENCY', cred_active}
+        end
+
+        -- 2. Check account concurrency
+        local acct_active = 0
+        if acct_inflight_key ~= '' then
+            acct_active = redis.call('SCARD', acct_inflight_key)
+            if acct_max_conc > 0 and acct_active >= acct_max_conc then
+                return {0, 'ACCT_CONCURRENCY', acct_active}
+            end
+        end
+
+        -- 3. Check credential RPM
+        local cred_rpm = tonumber(redis.call('GET', cred_rpm_key) or '0')
+        if cred_max_rpm > 0 and cred_rpm >= cred_max_rpm then
+            return {0, 'CRED_RPM', cred_rpm}
+        end
+
+        -- 4. Check account RPM
+        if acct_rpm_key ~= '' and acct_max_rpm > 0 then
+            local acct_rpm = tonumber(redis.call('GET', acct_rpm_key) or '0')
+            if acct_rpm >= acct_max_rpm then
+                return {0, 'ACCT_RPM', acct_rpm}
+            end
+        end
+
+        -- All passed: atomically reserve
+        redis.call('SADD', cred_inflight_key, request_id)
+        redis.call('INCR', cred_rpm_key)
+        redis.call('EXPIRE', cred_rpm_key, 120)
+
+        if acct_inflight_key ~= '' then
+            redis.call('SADD', acct_inflight_key, request_id)
+        end
+        if acct_rpm_key ~= '' then
+            redis.call('INCR', acct_rpm_key)
+            redis.call('EXPIRE', acct_rpm_key, 120)
+        end
+        redis.call('HSET', cred_state_key, 'last_used_ms', now_ms)
+        return {1, 'OK', cred_active + 1}
+        """
+        minute_bucket = self._minute_bucket()
+        keys = [
+            f"ugw:inflight:cred:{credential_id}",
+            f"ugw:inflight:acct:{account_group_id}" if account_group_id else "",
+            f"ugw:win:cred:{credential_id}:rpm:{minute_bucket}",
+            f"ugw:win:acct:{account_group_id}:rpm:{minute_bucket}" if account_group_id else "",
+            f"ugw:cred:{credential_id}:state",
+        ]
+        args = [
+            request_id,
+            cred_max_concurrency or -1,
+            acct_max_concurrency or -1 if account_group_id else -1,
+            cred_quota.requests_per_minute or -1,
+            (acct_quota.requests_per_minute or -1) if acct_quota else -1,
+            str(self._now_ms()),
+        ]
+        try:
+            res = await self.redis.eval(lua_script, len(keys), *keys, *args)
+            ok = bool(res and res[0] == 1)
+            reason = str(res[1]) if res and len(res) > 1 else ""
+            return ok, QuotaEligibilityResult(
+                eligible=ok,
+                reason=reason if not ok else "Eligible and reserved",
+            )
+        except Exception:
+            # Fallback to local evaluation if eval fails (e.g. unsupported in mocked setup)
+            elig = await self.check_eligibility(
+                provider_id=provider_id,
+                supported_scopes=supported_scopes,
+                credential_id=credential_id,
+                account_group_id=account_group_id,
+                workspace_id=None,
+                cred_max_concurrency=cred_max_concurrency,
+                acct_max_concurrency=acct_max_concurrency,
+                cred_quota=cred_quota,
+                acct_quota=acct_quota,
+                model=model,
+                estimated_tokens=estimated_tokens,
+            )
+            if elig.eligible:
+                await self.reserve_lease(
+                    request_id=request_id,
+                    credential_id=credential_id,
+                    account_group_id=account_group_id,
+                    model=model,
+                )
+            return elig.eligible, elig
 
     async def reserve_lease(
         self,

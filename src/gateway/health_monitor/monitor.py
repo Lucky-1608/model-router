@@ -99,10 +99,26 @@ class HealthMonitor:
     async def is_request_allowed(
         self, scope: CircuitScope, target_id: str
     ) -> tuple[bool, CircuitBreakerSnapshot]:
-        """Checks whether a request is allowed through the circuit breaker."""
+        """Checks whether a request is allowed through the circuit breaker.
+
+        If the circuit is HALF_OPEN, uses an atomic Redis SET NX probe lock to ensure only
+        `half_open_max_probes` concurrent caller is admitted through to test recovery, preventing
+        thundering herd on recovering upstreams.
+        """
         snap = await self.get_circuit_snapshot(scope, target_id)
         if snap.state == CircuitBreakerState.OPEN:
             return False, snap
+
+        if snap.state == CircuitBreakerState.HALF_OPEN:
+            prefix = self._key_prefix(scope, target_id)
+            probe_lock_key = f"{prefix}:probe_lock"
+            won_lock = await self.redis.set(
+                probe_lock_key, "1", ex=int(self._config.recovery_timeout_seconds), nx=True
+            )
+            if not won_lock:
+                # Another concurrent request is already probing; reject this one to prevent thundering herd
+                return False, snap
+
         return True, snap
 
     async def record_success(
@@ -183,6 +199,7 @@ class HealthMonitor:
             f"{prefix}:failures",
             f"{prefix}:opened_until",
             f"{prefix}:last_error",
+            f"{prefix}:probe_lock",
         )
         self._sync_registry_health(scope, target_id, HealthStatus.HEALTHY)
 

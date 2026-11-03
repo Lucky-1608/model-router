@@ -76,7 +76,8 @@ flowchart LR
   - Produced [`TEST_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/TEST_REPORT.md), [`SECURITY_AUDIT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/SECURITY_AUDIT.md), [`PERFORMANCE_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/PERFORMANCE_REPORT.md), and [`KNOWN_LIMITATIONS.md`](file:///c:/Users/vuppa/Documents/projects/model-router/KNOWN_LIMITATIONS.md).
   - **Verification Gate Passed**: All 61 automated tests passing (`pytest -v`).
 
-### Phase 9 — Documentation and Release
-- **Prompt 12 (Open-Source Release Preparation)**:
-  - Complete operator, developer, and contributor documentation, quickstart verification with a mock provider, benchmark methodology, `CHANGELOG.md`, and `LICENSE`.
+### Phase 9 — Documentation and Release (Completed)
+- **Prompt 12 (Open-Source Release Preparation — Completed)**:
+  - Completed operator, developer, and contributor documentation in [`README.md`](./README.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md), added [`CHANGELOG.md`](./CHANGELOG.md), [`LICENSE`](./LICENSE), and [`dashboard/Dockerfile`](./dashboard/Dockerfile), and updated [`docker-compose.yml`](./docker-compose.yml) for full-stack self-hosted deployment.
+  - **Verification Gate Passed**: All 9 phases (Prompts 1–12) completed and all 61 automated tests passing (`pytest -v`).
 

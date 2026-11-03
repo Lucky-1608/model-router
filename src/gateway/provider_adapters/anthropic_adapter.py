@@ -206,7 +206,10 @@ class AnthropicProviderAdapter(BaseProviderAdapter):
                         }
                     )
             if content_blocks:
-                anthropic_messages.append({"role": role, "content": content_blocks})
+                if anthropic_messages and anthropic_messages[-1]["role"] == role:
+                    anthropic_messages[-1]["content"].extend(content_blocks)
+                else:
+                    anthropic_messages.append({"role": role, "content": content_blocks})
 
         payload: dict[str, Any] = {
             "model": model_name,

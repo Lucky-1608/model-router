@@ -26,7 +26,13 @@ def tool_client() -> TestClient:
         admin_bootstrap_token="test-admin-secret-token-1234567890",
     )
     app = create_app(settings_override=settings)
-    with TestClient(app) as client:
+    with TestClient(
+        app,
+        headers={
+            "X-Gateway-Admin-Token": "test-admin-secret-token-1234567890",
+            "X-Gateway-Admin-Role": "SUPER_ADMIN",
+        },
+    ) as client:
         yield client
 
 

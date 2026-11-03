@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from pydantic import SecretStr
 
 from gateway.capability_registry.models import ProviderCapabilityManifest
+from gateway.core.auth import require_admin_access
 from gateway.core.canonical import AdapterCredential, DiscoveredModel, HealthCheckResult
 from gateway.provider_adapters.base import ConfigValidationResult, ProviderConfig
 from gateway.provider_registry.registry import ProviderRegistry, ProviderSummary
@@ -114,6 +115,7 @@ async def discover_provider_models(
 async def register_custom_provider(
     request: Request,
     config: ProviderConfig,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> ProviderSummary:
     registry = _get_registry(request)
     return await registry.register_custom_provider(config)
@@ -127,6 +129,7 @@ async def register_custom_provider(
 async def unregister_custom_provider(
     request: Request,
     provider_id: str,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> None:
     registry = _get_registry(request)
     await registry.unregister_provider(provider_id)

@@ -670,27 +670,85 @@ class CredentialManager:
                 candidates=eligible_candidates,
             )
 
+            cand_acct = (
+                acct_map.get(selected_rec.account_group_id)
+                if selected_rec.account_group_id
+                else None
+            )
+            cand_cred_quota = QuotaConfigSpec(**(selected_rec.quota_config or {}))
+            cand_acct_quota = (
+                QuotaConfigSpec(**(cand_acct.quota_config or {}))
+                if cand_acct
+                else None
+            )
             acct_id_str = (
                 str(selected_rec.account_group_id)
                 if selected_rec.account_group_id
                 else None
             )
-            await self._quota_manager.reserve_lease(
+            reserved, _ = await self._quota_manager.try_acquire_lease_atomic(
                 request_id=req_id,
+                provider_id=provider_id,
+                supported_scopes=supported_scopes,
                 credential_id=str(selected_rec.id),
                 account_group_id=acct_id_str,
+                workspace_id=selected_rec.workspace_id,
+                cred_max_concurrency=selected_rec.max_concurrency,
+                acct_max_concurrency=cand_acct.max_concurrency if cand_acct else None,
+                cred_quota=cand_cred_quota,
+                acct_quota=cand_acct_quota,
                 model=model,
+                endpoint=endpoint,
+                estimated_tokens=estimated_tokens,
             )
+            if not reserved:
+                raise RateLimitExceededError(
+                    f"Selected credential for provider {provider_id!r} could not acquire atomic lease",
+                    details={"provider_id": provider_id},
+                )
 
             adapter_cred = self._decrypt_to_adapter_credential(selected_rec)
             return CredentialLease(
                 request_id=req_id,
                 credential=adapter_cred,
-                account_group_id=acct_id_str,
+                account_group_id=str(selected_rec.account_group_id) if selected_rec.account_group_id else None,
                 workspace_id=selected_rec.workspace_id,
                 label=selected_rec.label,
                 masked_preview=selected_rec.masked_preview,
             )
+
+    async def _rank_candidates_by_strategy(
+        self,
+        *,
+        provider_id: str,
+        strategy: SelectionStrategy,
+        candidates: list[tuple[CredentialRecord, QuotaEligibilityResult]],
+    ) -> list[tuple[CredentialRecord, QuotaEligibilityResult]]:
+        ordered = sorted(candidates, key=lambda item: str(item[0].id))
+        if len(ordered) <= 1:
+            return ordered
+
+        if strategy == SelectionStrategy.ROUND_ROBIN:
+            idx = await self._quota_manager.next_round_robin_index(f"{provider_id}:rr")
+            start = idx % len(ordered)
+            return ordered[start:] + ordered[:start]
+
+        if strategy == SelectionStrategy.WEIGHTED:
+            # Sort descending by weight
+            return sorted(ordered, key=lambda c: -c[0].weight)
+
+        if strategy == SelectionStrategy.LEAST_RECENTLY_USED:
+            return sorted(ordered, key=lambda item: (item[1].last_used_ms or 0, str(item[0].id)))
+
+        # Default RATE_LIMIT_AWARE
+        def rate_limit_score(item: tuple[CredentialRecord, QuotaEligibilityResult]) -> float:
+            rec, elig = item
+            rem_req = elig.remaining_requests if elig.remaining_requests is not None else 1000
+            max_conc = rec.max_concurrency or 100
+            avail_conc_ratio = max(max_conc - elig.active_requests, 0) / max_conc
+            return (rem_req * 0.7) + (avail_conc_ratio * 100.0) + (rec.weight * 0.2)
+
+        return sorted(ordered, key=rate_limit_score, reverse=True)
 
     async def _apply_selection_strategy(
         self,

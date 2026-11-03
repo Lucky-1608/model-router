@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
+from gateway.core.auth import require_admin_access
 from gateway.model_registry.models import (
     ModelAliasSpec,
     ModelMetadata,
@@ -91,6 +92,7 @@ async def list_routing_models(
 async def register_routing_model(
     request: Request,
     payload: ModelRegistrationRequest,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> ModelMetadata:
     reg = _get_model_registry(request)
     return reg.register_model(payload)
@@ -103,6 +105,7 @@ async def register_routing_model(
 async def sync_provider_models_to_registry(
     request: Request,
     provider_id: str,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> dict[str, Any]:
     prov_reg = _get_provider_registry(request)
     model_reg = _get_model_registry(request)
@@ -164,6 +167,7 @@ async def upsert_routing_policy(
     request: Request,
     policy_name: str,
     payload: RoutingPolicySpec,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> RoutingPolicySpec:
     policy_engine = _get_policy_engine(request)
     updated = payload.model_copy(update={"name": policy_name})
@@ -189,6 +193,7 @@ async def upsert_model_alias(
     request: Request,
     alias_name: str,
     payload: ModelAliasSpec,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> ModelAliasSpec:
     reg = _get_model_registry(request)
     updated = payload.model_copy(update={"alias": alias_name})

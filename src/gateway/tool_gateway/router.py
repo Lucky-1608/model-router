@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 
+from gateway.core.auth import require_admin_access
 from gateway.tool_gateway.models import (
     DirectToolExecutionRequest,
     NormalizedToolCall,
@@ -49,6 +50,7 @@ async def list_registered_tools(
 async def register_gateway_tool(
     request: Request,
     payload: ToolRegistrationRequest,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> NormalizedToolSpec:
     reg = _get_tool_registry(request)
     return reg.register_tool(payload)
@@ -75,6 +77,7 @@ async def get_gateway_tool(
 async def unregister_gateway_tool(
     request: Request,
     tool_name: str,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> Response:
     reg = _get_tool_registry(request)
     reg.unregister_tool(tool_name)

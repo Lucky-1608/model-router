@@ -411,6 +411,7 @@ async def test_custom_protocol_and_explicit_native_passthrough(
     # Register a custom provider with custom request/response paths
     await async_client.post(
         "/api/v1/providers/custom",
+        headers={"X-Gateway-Admin-Token": "ugw_admin_test_token_1234567890"},
         json={
             "provider_id": "corp-llm",
             "display_name": "Corp LLM Gateway",

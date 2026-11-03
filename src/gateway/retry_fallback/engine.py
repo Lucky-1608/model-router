@@ -11,6 +11,7 @@ from gateway.core.canonical import (
     CanonicalInternalRequest,
     CanonicalInternalResponse,
     CanonicalStreamEvent,
+    TokenUsage,
 )
 from gateway.core.exceptions import (
     GatewayError,
@@ -53,7 +54,7 @@ class RetryFallbackEngine:
         self._credential_manager = credential_manager
         self._tool_orchestrator = tool_orchestrator
         self._guard = fallback_guard or FallbackCompatibilityGuard(
-            tool_registry=tool_orchestrator._tool_registry if tool_orchestrator else None
+            tool_registry=tool_orchestrator.tool_registry if tool_orchestrator else None
         )
 
     async def execute_resilient(
@@ -84,6 +85,7 @@ class RetryFallbackEngine:
 
         attempts: list[ExecutionAttemptTrace] = []
         last_exception: Exception | None = None
+        non_idempotent_tool_executed = False
 
         for idx, (cand_provider, cand_model_id, fallback_reason) in enumerate(
             candidates, start=1
@@ -103,7 +105,7 @@ class RetryFallbackEngine:
                         primary_provider_id=primary_provider,
                         candidate_model=cand_meta,
                         bytes_sent_to_client=0,
-                        non_idempotent_tool_executed=False,
+                        non_idempotent_tool_executed=non_idempotent_tool_executed,
                         allow_cross_provider=allow_cross_provider,
                     )
                     if not verdict.compatible:
@@ -217,6 +219,8 @@ class RetryFallbackEngine:
                 # Capability errors are deterministic client/schema violations; never mask via fallback unless primary had it
                 raise
             except GatewayError as exc:
+                if getattr(attempt_req, "provider_extensions", {}).get("non_idempotent_tool_executed"):
+                    non_idempotent_tool_executed = True
                 attempt_ms = round((time.perf_counter() - attempt_start) * 1000.0, 2)
                 is_retryable_err = exc.retryable or isinstance(
                     exc,
@@ -323,16 +327,58 @@ class RetryFallbackEngine:
                 if cand_provider == primary_provider
                 else None
             )
+
+            # If no explicit credential provided, acquire a managed routed credential lease
+            managed_lease = None
+            if cred is None and self._credential_manager is not None:
+                managed_creds = await self._credential_manager.list_credentials(
+                    provider_id=cand_provider
+                )
+                if managed_creds:
+                    try:
+                        managed_lease = await self._credential_manager.select_and_reserve_credential(
+                            provider_id=cand_provider,
+                            model=cand_model_id,
+                            request_id=request.request_id,
+                        )
+                        cred = managed_lease.credential
+                    except Exception as lease_exc:
+                        attempts.append(
+                            ExecutionAttemptTrace(
+                                attempt_number=idx,
+                                provider_id=cand_provider,
+                                model_id=cand_model_id,
+                                success=False,
+                                error_code="GW_NO_CREDENTIAL_LEASE",
+                                error_message=str(lease_exc),
+                                fallback_reason=fb_reason,
+                            )
+                        )
+                        last_exc = lease_exc
+                        continue
+
             start_ts = time.perf_counter()
             raw_iter = adapter.execute_stream(attempt_req, cred)
             try:
                 first_event = await anext(raw_iter)
             except StopAsyncIteration:
+                if managed_lease is not None and self._credential_manager is not None:
+                    await self._credential_manager.quota_manager.release_lease(
+                        request_id=managed_lease.request_id,
+                        credential_id=managed_lease.credential.credential_id,
+                        account_group_id=managed_lease.account_group_id,
+                    )
                 async def _empty_gen() -> AsyncIterator[CanonicalStreamEvent]:
                     if False:
                         yield first_event
                 return _empty_gen(), cand_provider, cand_model_id, attempts
             except GatewayError as exc:
+                if managed_lease is not None and self._credential_manager is not None:
+                    await self._credential_manager.quota_manager.release_lease(
+                        request_id=managed_lease.request_id,
+                        credential_id=managed_lease.credential.credential_id,
+                        account_group_id=managed_lease.account_group_id,
+                    )
                 await self._health_monitor.record_failure(
                     provider_id=cand_provider,
                     model_id=canonical_mid,
@@ -354,6 +400,14 @@ class RetryFallbackEngine:
                 if not exc.retryable or not allow_fallback:
                     raise
                 continue
+            except Exception as unhandled_exc:
+                if managed_lease is not None and self._credential_manager is not None:
+                    await self._credential_manager.quota_manager.release_lease(
+                        request_id=managed_lease.request_id,
+                        credential_id=managed_lease.credential.credential_id,
+                        account_group_id=managed_lease.account_group_id,
+                    )
+                raise unhandled_exc
 
             ttft_ms = round((time.perf_counter() - start_ts) * 1000.0, 2)
             attempts.append(
@@ -361,6 +415,7 @@ class RetryFallbackEngine:
                     attempt_number=idx,
                     provider_id=cand_provider,
                     model_id=cand_model_id,
+                    credential_id=managed_lease.credential.credential_id if managed_lease else None,
                     success=True,
                     latency_ms=ttft_ms,
                     fallback_reason=fb_reason,
@@ -373,12 +428,18 @@ class RetryFallbackEngine:
                 prov: str,
                 mid: str,
                 ttft: float,
+                active_lease: Any = managed_lease,
             ) -> AsyncIterator[CanonicalStreamEvent]:
                 bytes_sent = 1
+                accumulated_usage = TokenUsage()
                 yield first
                 try:
                     async for ev in rest:
                         bytes_sent += 1
+                        if ev.usage:
+                            accumulated_usage.input_tokens = max(accumulated_usage.input_tokens, ev.usage.input_tokens)
+                            accumulated_usage.output_tokens = max(accumulated_usage.output_tokens, ev.usage.output_tokens)
+                            accumulated_usage.total_tokens = max(accumulated_usage.total_tokens, ev.usage.total_tokens)
                         yield ev
                     total_ms = round((time.perf_counter() - start_ts) * 1000.0, 2)
                     await self._health_monitor.record_success(
@@ -397,6 +458,14 @@ class RetryFallbackEngine:
                         error_code="MID_STREAM_ERROR",
                     )
                     raise stream_exc
+                finally:
+                    if active_lease is not None and self._credential_manager is not None:
+                        await self._credential_manager.quota_manager.release_lease(
+                            request_id=active_lease.request_id,
+                            credential_id=active_lease.credential.credential_id,
+                            account_group_id=active_lease.account_group_id,
+                            usage=accumulated_usage if accumulated_usage.total_tokens > 0 else None,
+                        )
 
             return (
                 _guarded_stream(first_event, raw_iter, cand_provider, canonical_mid, ttft_ms),

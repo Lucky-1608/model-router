@@ -151,6 +151,7 @@ class InMemoryRedisFallback:
             self._sets.clear()
 
 
+
 class RedisManager:
     """Manages Redis async connection pooling, health checks, and graceful shutdown."""
 

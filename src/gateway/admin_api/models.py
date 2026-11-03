@@ -31,6 +31,18 @@ class ClientApiKeyORM(Base, TimestampUUIDMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class ControlPlaneEntityORM(Base, TimestampUUIDMixin):
+    """Persisted control-plane definitions (custom providers, routing policy overrides, webhook tools)."""
+
+    __tablename__ = "gateway_control_plane_entities"
+
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # provider, policy, tool, mcp
+    entity_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+
 class ClientApiKeyCreateRequest(BaseModel):
     """Payload to issue a new Client Gateway API Key."""
 

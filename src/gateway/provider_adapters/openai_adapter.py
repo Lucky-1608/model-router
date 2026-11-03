@@ -192,13 +192,16 @@ class OpenAIProviderAdapter(BaseProviderAdapter):
         model_name = request.provider_model_id or request.requested_model.removeprefix(
             f"{self.provider_id}/"
         )
+        is_reasoning_model = model_name.startswith(("o1", "o3", "o4"))
+        sys_role = "developer" if is_reasoning_model else "system"
         messages: list[dict[str, Any]] = []
         for sys_text in request.system_instructions:
-            messages.append({"role": "system", "content": sys_text})
+            messages.append({"role": sys_role, "content": sys_text})
 
         for msg in request.messages:
+            msg_role = sys_role if msg.role in ("system", "developer") else msg.role
             if len(msg.parts) == 1 and msg.parts[0].type == "text":
-                messages.append({"role": msg.role, "content": msg.parts[0].text or ""})
+                messages.append({"role": msg_role, "content": msg.parts[0].text or ""})
                 continue
 
             content_blocks: list[dict[str, Any]] = []
@@ -244,9 +247,9 @@ class OpenAIProviderAdapter(BaseProviderAdapter):
         }
         if stream:
             payload["stream_options"] = {"include_usage": True}
-        if request.temperature is not None:
+        if request.temperature is not None and not is_reasoning_model:
             payload["temperature"] = request.temperature
-        if request.top_p is not None:
+        if request.top_p is not None and not is_reasoning_model:
             payload["top_p"] = request.top_p
         if request.max_output_tokens is not None:
             payload["max_completion_tokens"] = request.max_output_tokens

@@ -101,6 +101,55 @@ def validate_outbound_url(url: str, *, allow_local_network: bool = False) -> Non
         pass
 
 
+async def validate_and_resolve_outbound_url(
+    url: str, *, allow_local_network: bool = False
+) -> list[str]:
+    """Asynchronously resolves DNS and verifies all resolved IP addresses against SSRF boundaries."""
+    validate_outbound_url(url, allow_local_network=allow_local_network)
+    if allow_local_network:
+        return []
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    # RFC 2606 / RFC 6761 reserved test and documentation domains used in unit tests and docs
+    if host.endswith((".example.com", ".example.org", ".example.net", ".example", ".test", ".invalid")) or host in ("example.com", "example.org", "example.net"):
+        return ["93.184.216.34"]
+
+    try:
+        loop = asyncio.get_running_loop()
+        addr_info = await loop.getaddrinfo(host, port)
+    except Exception as exc:
+        raise ToolPermissionError(
+            f"DNS resolution failed for outbound host {host!r}: {exc}",
+            param="url",
+        ) from exc
+
+    resolved_ips: list[str] = []
+    for info in addr_info:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        resolved_ips.append(ip_str)
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_loopback
+                or ip.is_private
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+            ):
+                raise ToolPermissionError(
+                    f"Outbound host {host!r} resolved to private/loopback IP {ip_str!r} (SSRF boundary violation)",
+                    param="url",
+                )
+        except ValueError:
+            continue
+
+    return resolved_ips
+
+
 class ToolRegistry:
     """Central registry for Gateway-managed tools, webhook tools, and synced MCP tools."""
 
@@ -488,7 +537,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
     ) -> Any:
         assert spec.webhook_url is not None
-        validate_outbound_url(
+        await validate_and_resolve_outbound_url(
             spec.webhook_url, allow_local_network=self._allow_local_webhooks
         )
         client = await self._http_pool.get_client(

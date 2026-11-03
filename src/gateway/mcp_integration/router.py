@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
+from gateway.core.auth import require_admin_access
 from gateway.mcp_integration.manager import MCPClientManager
 from gateway.mcp_integration.models import (
     MCPServerRegistrationRequest,
@@ -40,6 +41,7 @@ async def list_mcp_servers(request: Request) -> list[MCPServerStatus]:
 async def register_mcp_server(
     request: Request,
     payload: MCPServerRegistrationRequest,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> MCPServerStatus:
     mgr = _get_mcp_manager(request)
     return mgr.register_server(payload)
@@ -66,6 +68,7 @@ async def get_mcp_server(
 async def unregister_mcp_server(
     request: Request,
     server_id: str,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> Response:
     mgr = _get_mcp_manager(request)
     mgr.unregister_server(server_id)
@@ -92,6 +95,7 @@ async def check_mcp_server_health(
 async def sync_mcp_server_tools(
     request: Request,
     server_id: str,
+    _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> dict[str, Any]:
     mgr = _get_mcp_manager(request)
     descriptors = await mgr.sync_server_tools(server_id)

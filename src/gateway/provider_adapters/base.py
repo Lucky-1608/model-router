@@ -368,6 +368,15 @@ class BaseProviderAdapter(ABC):
                 details={"exception_type": type(exc).__name__},
             )
 
+    def raise_for_upstream_error(
+        self,
+        status_code: int,
+        headers: Mapping[str, str],
+        body: bytes | str | Mapping[str, Any] | None,
+    ) -> None:
+        """Classifies and raises an UpstreamProviderError for a non-2xx upstream response."""
+        self._raise_for_upstream_error(status_code, headers, body)
+
     def _raise_for_upstream_error(
         self,
         status_code: int,

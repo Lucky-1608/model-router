@@ -14,6 +14,7 @@ from gateway.capability_registry.models import (
     ProtocolType,
     ProviderCapabilityManifest,
 )
+from gateway.core.auth import is_client_api_key
 from gateway.core.canonical import (
     AdapterCredential,
     CanonicalInternalRequest,
@@ -22,24 +23,34 @@ from gateway.core.canonical import (
 )
 from gateway.core.exceptions import UnsupportedCapabilityError
 
+KNOWN_PROVIDER_IDS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "gemini",
+        "openrouter",
+        "groq",
+        "ollama",
+        "elevenlabs",
+    }
+)
+
 
 def resolve_target_provider_and_model(
     model_identifier: str,
     default_provider: str = "openai",
+    registered_providers: set[str] | None = None,
 ) -> tuple[str, str]:
-    """Resolves 'provider/model' or infers provider from known model prefixes."""
+    """Resolves 'provider/model' or infers provider from known model prefixes or dynamic registry."""
     cleaned = model_identifier.strip()
+    known = (
+        KNOWN_PROVIDER_IDS | set(registered_providers)
+        if registered_providers
+        else KNOWN_PROVIDER_IDS
+    )
     if "/" in cleaned:
         prefix, rest = cleaned.split("/", 1)
-        if prefix in (
-            "openai",
-            "anthropic",
-            "gemini",
-            "openrouter",
-            "groq",
-            "ollama",
-            "elevenlabs",
-        ):
+        if prefix in known:
             return prefix, rest
 
     lower = cleaned.lower()
@@ -57,25 +68,42 @@ def resolve_target_provider_and_model(
 def extract_request_credential(
     request: Request,
     provider_id: str,
-) -> AdapterCredential:
-    """Extracts an upstream credential from request headers for Phase 2 execution."""
+) -> AdapterCredential | None:
+    """Extracts an upstream credential from request headers.
+
+    If the bearer/auth token is a Gateway client key (`ugw_live_...`), it is NOT treated as an
+    upstream secret. In that case, returns None (or falls back to X-Upstream-Api-Key) so that
+    `CredentialManager` can select, rotate, and decrypt a managed upstream credential.
+    """
     headers = request.headers
-    secret = (
-        headers.get("X-Upstream-Api-Key")
-        or headers.get("x-api-key")
-        or headers.get("x-goog-api-key")
-        or headers.get("xi-api-key")
-        or ""
-    )
-    if not secret:
-        auth_val = headers.get("Authorization") or ""
-        if auth_val.lower().startswith("bearer "):
-            secret = auth_val[7:].strip()
-        elif auth_val:
-            secret = auth_val.strip()
+    # Explicit upstream override header always takes precedence
+    secret = headers.get("X-Upstream-Api-Key") or ""
 
     if not secret:
-        secret = request.query_params.get("key") or ""
+        # Check standard headers, ignoring any client API key tokens (ugw_live_...)
+        for hdr in ("x-api-key", "x-goog-api-key", "xi-api-key"):
+            val = headers.get(hdr)
+            if val and not is_client_api_key(val):
+                secret = val.strip()
+                break
+
+    if not secret:
+        auth_val = headers.get("Authorization") or ""
+        token = ""
+        if auth_val.lower().startswith("bearer "):
+            token = auth_val[7:].strip()
+        elif auth_val:
+            token = auth_val.strip()
+        if token and not is_client_api_key(token):
+            secret = token
+
+    if not secret:
+        query_key = request.query_params.get("key") or ""
+        if query_key and not is_client_api_key(query_key):
+            secret = query_key.strip()
+
+    if not secret:
+        return None
 
     return AdapterCredential(
         provider_id=provider_id,

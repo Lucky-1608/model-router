@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from gateway.core.auth import (
+    authenticate_client_request,
+    enforce_client_key_policy,
+    resolve_client_allowed_tools,
+)
 from gateway.core.canonical import (
     CanonicalInternalRequest,
     NativePassthroughRequest,
@@ -118,27 +124,30 @@ async def _record_gateway_usage(
     tok = usage or TokenUsage()
     tracker = _get_usage_tracker(request)
     metrics = _get_metrics(request)
-    rec = await tracker.record_usage(
-        UsageEventInput(
-            request_id=req_id,
-            decision_id=decision_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            credential_id=credential_id,
-            protocol=protocol,
-            integration_mode=integration_mode,
-            stream=stream,
-            status_code=status_code,
-            success=success,
-            error_code=error_code,
-            attempt_count=attempt_count,
-            fallback_used=fallback_used,
-            tool_rounds=tool_rounds,
-            usage=tok,
-            latency_ms=latency_ms,
-            ttft_ms=ttft_ms,
-        )
+    client_key_view = getattr(request.state, "client_key", None)
+    client_key_id = client_key_view.id if client_key_view else None
+
+    event = UsageEventInput(
+        request_id=req_id,
+        decision_id=decision_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        credential_id=credential_id,
+        client_key_id=client_key_id,
+        protocol=protocol,
+        integration_mode=integration_mode,
+        stream=stream,
+        status_code=status_code,
+        success=success,
+        error_code=error_code,
+        attempt_count=attempt_count,
+        fallback_used=fallback_used,
+        tool_rounds=tool_rounds,
+        usage=tok,
+        latency_ms=latency_ms,
+        ttft_ms=ttft_ms,
     )
+    cost_usd = tracker.enqueue_usage(event)
     metrics.record_request(
         provider_id=provider_id,
         model_id=model_id,
@@ -148,10 +157,86 @@ async def _record_gateway_usage(
         ttft_ms=ttft_ms,
         input_tokens=tok.input_tokens,
         output_tokens=tok.output_tokens,
-        cost_usd=rec.estimated_cost_usd,
+        cost_usd=cost_usd,
         fallback_used=fallback_used,
         primary_provider_id=primary_provider_id,
     )
+
+
+async def _instrumented_stream_accounting(
+    stream_iter: AsyncIterator[CanonicalStreamEvent],
+    *,
+    request: Request,
+    provider_id: str,
+    model_id: str,
+    protocol: str,
+    primary_provider_id: str,
+    attempt_count: int,
+    fallback_used: bool,
+    ttft_ms: float | None,
+    decision_id: str | None,
+    credential_id: str | None = None,
+) -> AsyncIterator[CanonicalStreamEvent]:
+    start_ts = time.perf_counter()
+    accumulated_usage = TokenUsage()
+    first_chunk_received = False
+    status_code = 200
+    success = True
+    error_code = None
+    observed_ttft = ttft_ms
+
+    try:
+        async for event in stream_iter:
+            if not first_chunk_received:
+                first_chunk_received = True
+                if observed_ttft is None:
+                    observed_ttft = round((time.perf_counter() - start_ts) * 1000.0, 2)
+            if event.usage:
+                accumulated_usage.input_tokens = max(
+                    accumulated_usage.input_tokens, event.usage.input_tokens
+                )
+                accumulated_usage.output_tokens = max(
+                    accumulated_usage.output_tokens, event.usage.output_tokens
+                )
+                accumulated_usage.total_tokens = max(
+                    accumulated_usage.total_tokens, event.usage.total_tokens
+                )
+                accumulated_usage.cached_input_tokens = max(
+                    accumulated_usage.cached_input_tokens, event.usage.cached_input_tokens
+                )
+                accumulated_usage.reasoning_tokens = max(
+                    accumulated_usage.reasoning_tokens, event.usage.reasoning_tokens
+                )
+                accumulated_usage.characters = max(
+                    accumulated_usage.characters, event.usage.characters
+                )
+            yield event
+    except Exception as exc:
+        success = False
+        status_code = getattr(exc, "status_code", 500)
+        error_code = getattr(exc, "error_code", type(exc).__name__)
+        raise
+    finally:
+        total_lat_ms = round((time.perf_counter() - start_ts) * 1000.0, 2)
+        await _record_gateway_usage(
+            request,
+            provider_id=provider_id,
+            model_id=model_id,
+            protocol=protocol,
+            integration_mode="unified",
+            stream=True,
+            status_code=status_code,
+            success=success,
+            error_code=error_code,
+            attempt_count=attempt_count,
+            fallback_used=fallback_used,
+            primary_provider_id=primary_provider_id,
+            usage=accumulated_usage,
+            latency_ms=total_lat_ms,
+            ttft_ms=observed_ttft,
+            credential_id=credential_id,
+            decision_id=decision_id,
+        )
 
 
 def _extract_tool_context(
@@ -235,8 +320,12 @@ async def _resolve_via_routing_or_direct(
             True,
         )
 
+    provider_reg = _get_registry(request)
+    registered_provs = {a.provider_id for a in provider_reg.list_adapters(enabled_only=True)}
     target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider=default_provider
+        canonical_req.requested_model,
+        default_provider=default_provider,
+        registered_providers=registered_provs,
     )
     return target_provider, clean_model, None, False
 
@@ -259,12 +348,15 @@ async def openai_chat_completions(request: Request) -> Response:
     req_start = time.perf_counter()
 
     canonical_req = openai_chat_proto.parse_request(payload)
+    await authenticate_client_request(request)
     target_provider, clean_model, decision_id, routed_by_engine = (
         await _resolve_via_routing_or_direct(
             request, canonical_req, default_provider="openai"
         )
     )
+    await enforce_client_key_policy(request, target_provider=target_provider)
     tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    allowed_tools = resolve_client_allowed_tools(request, allowed_tools)
     tool_orchestrator.prepare_request_tools(
         canonical_req,
         target_provider=target_provider,
@@ -311,6 +403,19 @@ async def openai_chat_completions(request: Request) -> Response:
                     native_resp.status_code, native_resp.headers, native_resp.body_bytes
                 )
             lat_ms = round((time.perf_counter() - req_start) * 1000.0, 2)
+            parsed_usage: TokenUsage | None = native_resp.usage
+            if parsed_usage is None and native_resp.body_bytes:
+                try:
+                    raw_json = json.loads(native_resp.body_bytes)
+                    u = raw_json.get("usage")
+                    if isinstance(u, dict):
+                        parsed_usage = TokenUsage(
+                            input_tokens=u.get("prompt_tokens") or 0,
+                            output_tokens=u.get("completion_tokens") or 0,
+                            total_tokens=u.get("total_tokens") or 0,
+                        )
+                except Exception:
+                    pass
             await _record_gateway_usage(
                 request,
                 provider_id=target_provider,
@@ -319,6 +424,7 @@ async def openai_chat_completions(request: Request) -> Response:
                 integration_mode="native",
                 status_code=native_resp.status_code,
                 latency_ms=lat_ms,
+                usage=parsed_usage,
                 credential_id=credential.credential_id if credential else None,
             )
             return Response(
@@ -346,19 +452,18 @@ async def openai_chat_completions(request: Request) -> Response:
         )
         ttft_val = attempts[-1].latency_ms if attempts else None
         fb_used = len(attempts) > 1
-        await _record_gateway_usage(
-            request,
+        instrumented_iter = _instrumented_stream_accounting(
+            stream_iter,
+            request=request,
             provider_id=sel_prov,
             model_id=sel_mod,
             protocol="openai_chat",
-            integration_mode="unified",
-            stream=True,
+            primary_provider_id=target_provider,
             attempt_count=len(attempts),
             fallback_used=fb_used,
-            primary_provider_id=target_provider,
-            latency_ms=ttft_val or 0.0,
             ttft_ms=ttft_val,
             decision_id=decision_id,
+            credential_id=attempts[-1].credential_id if attempts else None,
         )
         stream_headers: dict[str, str] = {
             "X-Gateway-Provider": sel_prov,
@@ -371,7 +476,7 @@ async def openai_chat_completions(request: Request) -> Response:
         if decision_id:
             stream_headers["X-Gateway-Route-Decision-Id"] = decision_id
         return StreamingResponse(
-            openai_chat_proto.format_stream_events(stream_iter, sel_mod),
+            openai_chat_proto.format_stream_events(instrumented_iter, sel_mod),
             media_type="text/event-stream",
             headers=stream_headers,
         )
@@ -450,9 +555,11 @@ async def openai_embeddings(request: Request) -> Response:
     retry_fallback = _get_retry_fallback(request)
     payload = await request.json()
     canonical_req = openai_chat_proto.parse_embeddings_request(payload)
+    await authenticate_client_request(request)
     target_provider, clean_model, decision_id, _ = await _resolve_via_routing_or_direct(
         request, canonical_req, default_provider="openai"
     )
+    await enforce_client_key_policy(request, target_provider=target_provider)
     adapter = registry.get_adapter(target_provider)
     manifest = adapter.get_capability_manifest()
     enforce_capability_compatibility(canonical_req, manifest)
@@ -552,10 +659,13 @@ async def openai_responses_api(request: Request) -> Response:
     payload = await request.json()
 
     canonical_req = openai_responses_proto.parse_request(payload)
-    target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider="openai"
+    await authenticate_client_request(request)
+    target_provider, clean_model, decision_id, _ = await _resolve_via_routing_or_direct(
+        request, canonical_req, default_provider="openai"
     )
+    await enforce_client_key_policy(request, target_provider=target_provider)
     tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    allowed_tools = resolve_client_allowed_tools(request, allowed_tools)
     tool_orchestrator.prepare_request_tools(
         canonical_req,
         target_provider=target_provider,
@@ -605,8 +715,21 @@ async def openai_responses_api(request: Request) -> Response:
                 allow_fallback=allow_fallback,
             )
         )
+        instrumented_iter = _instrumented_stream_accounting(
+            stream_iter,
+            request=request,
+            provider_id=sel_prov,
+            model_id=sel_mod,
+            protocol="openai_responses",
+            primary_provider_id=target_provider,
+            attempt_count=len(attempts),
+            fallback_used=len(attempts) > 1,
+            ttft_ms=attempts[-1].latency_ms if attempts else None,
+            decision_id=None,
+            credential_id=attempts[-1].credential_id if attempts else None,
+        )
         return StreamingResponse(
-            openai_responses_proto.format_stream_events(stream_iter, sel_mod),
+            openai_responses_proto.format_stream_events(instrumented_iter, sel_mod),
             media_type="text/event-stream",
             headers={
                 "X-Gateway-Provider": sel_prov,
@@ -666,10 +789,13 @@ async def anthropic_messages_api(request: Request) -> Response:
     payload = await request.json()
 
     canonical_req = anthropic_proto.parse_request(payload)
-    target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider="anthropic"
+    await authenticate_client_request(request)
+    target_provider, clean_model, decision_id, _ = await _resolve_via_routing_or_direct(
+        request, canonical_req, default_provider="anthropic"
     )
+    await enforce_client_key_policy(request, target_provider=target_provider)
     tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    allowed_tools = resolve_client_allowed_tools(request, allowed_tools)
     tool_orchestrator.prepare_request_tools(
         canonical_req,
         target_provider=target_provider,
@@ -719,8 +845,21 @@ async def anthropic_messages_api(request: Request) -> Response:
                 allow_fallback=allow_fallback,
             )
         )
+        instrumented_iter = _instrumented_stream_accounting(
+            stream_iter,
+            request=request,
+            provider_id=sel_prov,
+            model_id=sel_mod,
+            protocol="anthropic_messages",
+            primary_provider_id=target_provider,
+            attempt_count=len(attempts),
+            fallback_used=len(attempts) > 1,
+            ttft_ms=attempts[-1].latency_ms if attempts else None,
+            decision_id=None,
+            credential_id=attempts[-1].credential_id if attempts else None,
+        )
         return StreamingResponse(
-            anthropic_proto.format_stream_events(stream_iter, sel_mod),
+            anthropic_proto.format_stream_events(instrumented_iter, sel_mod),
             media_type="text/event-stream",
             headers={
                 "X-Gateway-Provider": sel_prov,
@@ -791,10 +930,13 @@ async def gemini_native_api(request: Request, model_action: str) -> Response:
     canonical_req = gemini_proto.parse_request(
         payload, model=model_name, stream=is_stream
     )
-    target_provider, clean_model = resolve_target_provider_and_model(
-        canonical_req.requested_model, default_provider="gemini"
+    await authenticate_client_request(request)
+    target_provider, clean_model, decision_id, _ = await _resolve_via_routing_or_direct(
+        request, canonical_req, default_provider="gemini"
     )
+    await enforce_client_key_policy(request, target_provider=target_provider)
     tool_mode, allowed_tools, client_id, max_rounds = _extract_tool_context(request)
+    allowed_tools = resolve_client_allowed_tools(request, allowed_tools)
     tool_orchestrator.prepare_request_tools(
         canonical_req,
         target_provider=target_provider,
@@ -845,8 +987,21 @@ async def gemini_native_api(request: Request, model_action: str) -> Response:
                 allow_fallback=allow_fallback,
             )
         )
+        instrumented_iter = _instrumented_stream_accounting(
+            stream_iter,
+            request=request,
+            provider_id=sel_prov,
+            model_id=sel_mod,
+            protocol="gemini_native",
+            primary_provider_id=target_provider,
+            attempt_count=len(attempts),
+            fallback_used=len(attempts) > 1,
+            ttft_ms=attempts[-1].latency_ms if attempts else None,
+            decision_id=None,
+            credential_id=attempts[-1].credential_id if attempts else None,
+        )
         return StreamingResponse(
-            gemini_proto.format_stream_events(stream_iter, sel_mod),
+            gemini_proto.format_stream_events(instrumented_iter, sel_mod),
             media_type="text/event-stream",
             headers={
                 "X-Gateway-Provider": sel_prov,

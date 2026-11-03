@@ -217,6 +217,7 @@ def test_security_boundary_audit_ssrf_rbac_and_zero_secret_leakage(
         # 1. SSRF Boundary Check on Custom Provider Registration (AWS/GCP Metadata IP 169.254.169.254)
         ssrf_prov = client.post(
             "/api/v1/providers/custom",
+            headers=admin_headers,
             json={
                 "provider_id": "evil-ssrf-provider",
                 "display_name": "Evil Metadata Probe",
@@ -228,6 +229,7 @@ def test_security_boundary_audit_ssrf_rbac_and_zero_secret_leakage(
         # 2. SSRF Boundary Check on Webhook Tool Registration (loopback 127.0.0.1)
         ssrf_tool = client.post(
             "/api/v1/tools",
+            headers=admin_headers,
             json={
                 "name": "evil_internal_probe",
                 "description": "Attempts loopback SSRF",
@@ -240,6 +242,7 @@ def test_security_boundary_audit_ssrf_rbac_and_zero_secret_leakage(
         # 3. SSRF Boundary Check on MCP Server Registration (private 10.0.0.1)
         ssrf_mcp = client.post(
             "/api/v1/mcp/servers",
+            headers=admin_headers,
             json={
                 "server_id": "evil-mcp",
                 "name": "Evil Internal MCP",

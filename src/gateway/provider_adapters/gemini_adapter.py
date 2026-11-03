@@ -218,7 +218,10 @@ class GeminiProviderAdapter(BaseProviderAdapter):
                         }
                     )
             if parts:
-                contents.append({"role": role, "parts": parts})
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"].extend(parts)
+                else:
+                    contents.append({"role": role, "parts": parts})
 
         payload: dict[str, Any] = {"contents": contents}
         if sys_parts:

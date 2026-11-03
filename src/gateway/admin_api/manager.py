@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
+import time
 from typing import Any
 import uuid
 
@@ -18,7 +20,11 @@ from gateway.admin_api.models import (
 )
 from gateway.config.settings import GatewaySettings
 from gateway.core.db import Base, DatabaseManager
-from gateway.core.exceptions import ResourceNotFoundError
+from gateway.core.exceptions import (
+    AuthenticationError,
+    RateLimitExceededError,
+    ResourceNotFoundError,
+)
 from gateway.core.redis import RedisManager
 
 
@@ -80,6 +86,42 @@ class AdminControlPlaneManager:
             stmt = select(ClientApiKeyORM).order_by(desc(ClientApiKeyORM.created_at))
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_view(r) for r in rows]
+
+    async def authenticate_client_key(self, raw_key: str) -> ClientApiKeyView:
+        """Validates a raw `ugw_live_...` key and consumes one unit of its per-minute rate limit.
+
+        Only the SHA-256 hash is ever compared (lookup on the indexed hash column plus a
+        constant-time re-check), so raw keys are never stored or logged.
+        """
+        key_hash = self._hash_key(raw_key)
+        async with self._db_manager.session() as session:
+            stmt = select(ClientApiKeyORM).where(ClientApiKeyORM.key_hash == key_hash)
+            row = (await session.execute(stmt)).scalars().first()
+            if (
+                row is None
+                or not hmac.compare_digest(row.key_hash, key_hash)
+                or not row.enabled
+            ):
+                raise AuthenticationError(
+                    "Invalid or revoked Gateway client API key",
+                    error_code="GW_CLIENT_KEY_INVALID",
+                )
+            view = self._to_view(row)
+
+        if view.rate_limit_rpm and view.rate_limit_rpm > 0:
+            minute_bucket = int(time.time() // 60)
+            rpm_key = f"ugw:client_key:{view.id}:rpm:{minute_bucket}"
+            redis = self._redis_manager.client
+            used = await redis.incr(rpm_key)
+            if used == 1:
+                await redis.expire(rpm_key, 120)
+            if used > view.rate_limit_rpm:
+                raise RateLimitExceededError(
+                    f"Client API key rate limit ({view.rate_limit_rpm} RPM) exceeded",
+                    error_code="GW_CLIENT_KEY_RATE_LIMITED",
+                    details={"rate_limit_rpm": view.rate_limit_rpm},
+                )
+        return view
 
     async def revoke_client_key(self, key_id: str) -> ClientApiKeyView:
         try:

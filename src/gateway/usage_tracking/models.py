@@ -27,6 +27,8 @@ class UsageRecordORM(Base):
     model_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     credential_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     account_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Gateway client API key (ClientApiKeyORM.id) that issued the request; used for budget enforcement.
+    client_key_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     protocol: Mapped[str] = mapped_column(String(64), nullable=False, default="openai_chat")
     integration_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="unified")
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -61,6 +63,7 @@ class UsageEventInput(BaseModel):
     model_id: str
     credential_id: str | None = None
     account_group_id: str | None = None
+    client_key_id: str | None = None
     protocol: str = "openai_chat"
     integration_mode: str = "unified"
     stream: bool = False
@@ -85,6 +88,7 @@ class UsageRecordView(BaseModel):
     model_id: str
     credential_id: str | None = None
     account_group_id: str | None = None
+    client_key_id: str | None = None
     protocol: str
     integration_mode: str
     stream: bool

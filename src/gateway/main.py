@@ -76,6 +76,9 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
     usage_tracker = UsageTracker(
         db_manager=db_manager,
         model_registry=model_registry,
+        flush_interval_seconds=settings.usage_flush_interval_seconds,
+        flush_batch_size=settings.usage_flush_batch_size,
+        queue_max_size=settings.usage_queue_max_size,
     )
     admin_manager = AdminControlPlaneManager(
         settings=settings,
@@ -100,10 +103,12 @@ def create_app(settings_override: GatewaySettings | None = None) -> FastAPI:
         await admin_manager.ensure_tables()
         await http_pool.get_client("default")
         await provider_registry.startup_all()
+        usage_tracker.start_background_writer()
         try:
             yield
         finally:
             logger.info("gateway_shutting_down")
+            await usage_tracker.stop_background_writer()
             await provider_registry.shutdown_all()
             await http_pool.aclose_all()
             await redis_manager.close()

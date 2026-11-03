@@ -78,7 +78,10 @@ async def test_register_and_unregister_custom_provider_api(
             "supported_capabilities": ["chat_completions", "streaming"],
         },
     }
-    create_resp = await async_client.post("/api/v1/providers/custom", json=custom_payload)
+    admin_headers = {"X-Gateway-Admin-Token": "ugw_admin_test_token_1234567890"}
+    create_resp = await async_client.post(
+        "/api/v1/providers/custom", json=custom_payload, headers=admin_headers
+    )
     assert create_resp.status_code == 201
     created = create_resp.json()
     assert created["provider_id"] == "vllm-cluster"
@@ -91,7 +94,9 @@ async def test_register_and_unregister_custom_provider_api(
     assert disc_resp.json()[0]["canonical_model_id"] == "vllm-cluster/deepseek-coder-33b"
 
     # Unregister custom provider
-    del_resp = await async_client.delete("/api/v1/providers/custom/vllm-cluster")
+    del_resp = await async_client.delete(
+        "/api/v1/providers/custom/vllm-cluster", headers=admin_headers
+    )
     assert del_resp.status_code == 204
 
     check_resp = await async_client.get("/api/v1/providers/vllm-cluster")

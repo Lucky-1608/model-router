@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hmac
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Request, status
 
+from gateway.core.auth import require_admin_access
 from gateway.core.canonical import HealthCheckResult
-from gateway.core.exceptions import AuthenticationError, AuthorizationError
 from gateway.credential_manager.manager import CredentialManager
 from gateway.credential_manager.models import (
     AccountGroupCreateRequest,
@@ -21,36 +20,9 @@ from gateway.credential_manager.models import (
 )
 
 
-def require_admin_access(
-    request: Request,
-    x_gateway_admin_token: str | None = Header(
-        default=None, alias="X-Gateway-Admin-Token"
-    ),
-    x_gateway_admin_role: str = Header(
-        default="SUPER_ADMIN", alias="X-Gateway-Admin-Role"
-    ),
-    authorization: str | None = Header(default=None),
-) -> tuple[str, str]:
-    """Verifies administrative access token and role-based permissions."""
-    expected_token = (
-        request.app.state.settings.admin_bootstrap_token.get_secret_value()
-    )
-    provided = x_gateway_admin_token
-    if not provided and authorization and authorization.lower().startswith("bearer "):
-        provided = authorization[7:].strip()
-
-    if not provided or not hmac.compare_digest(provided, expected_token):
-        raise AuthenticationError(
-            "Valid administrative credentials required (X-Gateway-Admin-Token)"
-        )
-
-    role = x_gateway_admin_role.upper()
-    if request.method in ("POST", "PUT", "PATCH", "DELETE") and role == "READ_ONLY":
-        raise AuthorizationError(
-            "READ_ONLY role cannot mutate credentials or account groups"
-        )
-    actor_id = request.headers.get("X-Gateway-Actor-Id", f"admin:{role.lower()}")
-    return actor_id, role
+# `require_admin_access` now lives in `gateway.core.auth` so every control-plane router can use it
+# without importing this module; it is re-exported here for backward compatibility.
+__all__ = ["credential_admin_router", "require_admin_access"]
 
 
 credential_admin_router = APIRouter(

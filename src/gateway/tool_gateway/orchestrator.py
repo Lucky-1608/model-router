@@ -42,6 +42,10 @@ class ToolGatewayOrchestrator:
         self._tool_registry = tool_registry
         self._default_max_tool_rounds = default_max_tool_rounds
 
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        return self._tool_registry
+
     def prepare_request_tools(
         self,
         request: CanonicalInternalRequest,
@@ -101,6 +105,14 @@ class ToolGatewayOrchestrator:
             reasoning_tokens=response.usage.reasoning_tokens,
             characters=response.usage.characters,
         )
+        # Track whether any executed tool call is non-idempotent
+        if request.provider_extensions is None:
+            request.provider_extensions = {}
+        for tc in response.tool_calls:
+            spec = self._tool_registry.get_tool(tc.name)
+            if spec and not getattr(spec, "idempotent", True):
+                request.provider_extensions["non_idempotent_tool_executed"] = True
+
         traces: list[ToolExecutionStepTrace] = []
         round_idx = 0
 

@@ -40,6 +40,15 @@ class GatewaySettings(BaseSettings):
     admin_bootstrap_token: SecretStr = Field(default=SecretStr(INSECURE_BOOTSTRAP_TOKEN))
     store_prompts: bool = False
     allow_local_hosts: str = "localhost:11434,127.0.0.1:11434,ollama:11434"
+    # Data-plane auth: when True, every /v1/* request must present a Gateway client key (ugw_live_...).
+    # When False (default), requests without a client key run in BYOK pass-through mode.
+    require_client_api_key: bool = False
+    # Background usage writer (keeps DB INSERT/COMMIT off the request hot path)
+    usage_flush_interval_seconds: float = Field(default=0.25, gt=0.0, le=60.0)
+    usage_flush_batch_size: int = Field(default=100, ge=1, le=10000)
+    usage_queue_max_size: int = Field(default=10000, ge=1, le=1_000_000)
+    # Prometheus label-cardinality guard
+    metrics_max_series: int = Field(default=2000, ge=10, le=1_000_000)
 
     # PostgreSQL / Database Configuration
     database_url: str = (

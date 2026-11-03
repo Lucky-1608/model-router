@@ -16,9 +16,10 @@ def _escape_label(value: str) -> str:
 
 
 class MetricsCollector:
-    """In-memory Prometheus-compatible metrics collector with text exposition."""
+    """In-memory Prometheus-compatible metrics collector with cardinality guard and text exposition."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_distinct_series: int = 2000) -> None:
+        self._max_distinct_series = max_distinct_series
         self._requests_total: dict[tuple[str, str, str, str], int] = defaultdict(int)
         self._latency_sum_ms: dict[tuple[str, str], float] = defaultdict(float)
         self._latency_count: dict[tuple[str, str], int] = defaultdict(int)
@@ -27,6 +28,13 @@ class MetricsCollector:
         self._tokens_total: dict[tuple[str, str, str], int] = defaultdict(int)
         self._cost_usd_total: dict[tuple[str, str], float] = defaultdict(float)
         self._fallback_total: dict[tuple[str, str], int] = defaultdict(int)
+
+    def _normalize_model_id(self, provider_id: str, model_id: str) -> str:
+        # If cardinality threshold reached for this provider/model pair, collapse arbitrary strings to "_other"
+        key = (provider_id, model_id)
+        if key not in self._latency_count and len(self._latency_count) >= self._max_distinct_series:
+            return "_other"
+        return model_id
 
     def record_request(
         self,
@@ -43,22 +51,23 @@ class MetricsCollector:
         fallback_used: bool = False,
         primary_provider_id: str | None = None,
     ) -> None:
-        """Records metrics for a completed gateway request."""
-        self._requests_total[(provider_id, model_id, protocol, status)] += 1
-        self._latency_sum_ms[(provider_id, model_id)] += latency_ms
-        self._latency_count[(provider_id, model_id)] += 1
+        """Records metrics for a completed gateway request with cardinality protection."""
+        norm_model = self._normalize_model_id(provider_id, model_id)
+        self._requests_total[(provider_id, norm_model, protocol, status)] += 1
+        self._latency_sum_ms[(provider_id, norm_model)] += latency_ms
+        self._latency_count[(provider_id, norm_model)] += 1
 
         if ttft_ms is not None:
-            self._ttft_sum_ms[(provider_id, model_id)] += ttft_ms
-            self._ttft_count[(provider_id, model_id)] += 1
+            self._ttft_sum_ms[(provider_id, norm_model)] += ttft_ms
+            self._ttft_count[(provider_id, norm_model)] += 1
 
         if input_tokens > 0:
-            self._tokens_total[(provider_id, model_id, "input")] += input_tokens
+            self._tokens_total[(provider_id, norm_model, "input")] += input_tokens
         if output_tokens > 0:
-            self._tokens_total[(provider_id, model_id, "output")] += output_tokens
+            self._tokens_total[(provider_id, norm_model, "output")] += output_tokens
 
         if cost_usd > 0.0:
-            self._cost_usd_total[(provider_id, model_id)] += cost_usd
+            self._cost_usd_total[(provider_id, norm_model)] += cost_usd
 
         if fallback_used:
             from_prov = primary_provider_id or provider_id
