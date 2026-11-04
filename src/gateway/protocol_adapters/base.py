@@ -10,7 +10,6 @@ from fastapi import Request
 from pydantic import SecretStr
 
 from gateway.capability_registry.models import (
-    CapabilityFlag,
     ProtocolType,
     ProviderCapabilityManifest,
 )

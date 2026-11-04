@@ -16,7 +16,6 @@ import httpx
 from pydantic import SecretStr
 
 from gateway.core.canonical import (
-    NormalizedToolCall as CanonicalToolCall,
     NormalizedToolDefinition,
 )
 from gateway.core.exceptions import (

@@ -238,6 +238,7 @@ class HealthMonitor:
             await self.redis.set(
                 f"{prefix}:opened_until", str(opened_until), ex=ttl
             )
+            await self.redis.delete(f"{prefix}:probe_lock")
             self._sync_registry_health(scope, target_id, HealthStatus.UNHEALTHY)
         else:
             self._sync_registry_health(scope, target_id, HealthStatus.DEGRADED)

@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import secrets
 import time
-from typing import Any
 import uuid
 
 from sqlalchemy import desc, select
@@ -16,6 +15,7 @@ from gateway.admin_api.models import (
     ClientApiKeyCreateRequest,
     ClientApiKeyORM,
     ClientApiKeyView,
+    ControlPlaneEntityORM,
     SystemSettingsView,
 )
 from gateway.config.settings import GatewaySettings
@@ -126,7 +126,7 @@ class AdminControlPlaneManager:
     async def revoke_client_key(self, key_id: str) -> ClientApiKeyView:
         try:
             uid = uuid.UUID(key_id)
-        except ValueError as exc:
+        except (ValueError, AttributeError) as exc:
             raise ResourceNotFoundError(f"Client API key {key_id!r} not found") from exc
 
         async with self._db_manager.session() as session:
@@ -141,7 +141,7 @@ class AdminControlPlaneManager:
     async def delete_client_key(self, key_id: str) -> None:
         try:
             uid = uuid.UUID(key_id)
-        except ValueError as exc:
+        except (ValueError, AttributeError) as exc:
             raise ResourceNotFoundError(f"Client API key {key_id!r} not found") from exc
 
         async with self._db_manager.session() as session:
@@ -149,6 +149,48 @@ class AdminControlPlaneManager:
             if row is None:
                 raise ResourceNotFoundError(f"Client API key {key_id!r} not found")
             await session.delete(row)
+
+    async def persist_entity(
+        self, entity_type: str, entity_id: str, payload_json: str
+    ) -> None:
+        """Persists or updates a control-plane entity in the gateway_control_plane_entities table."""
+        async with self._db_manager.session() as session:
+            stmt = select(ControlPlaneEntityORM).where(
+                ControlPlaneEntityORM.entity_type == entity_type,
+                ControlPlaneEntityORM.entity_id == entity_id,
+            )
+            existing = (await session.execute(stmt)).scalars().first()
+            if existing:
+                existing.payload_json = payload_json
+            else:
+                session.add(
+                    ControlPlaneEntityORM(
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        payload_json=payload_json,
+                    )
+                )
+
+    async def list_persisted_entities(
+        self, entity_type: str | None = None
+    ) -> list[ControlPlaneEntityORM]:
+        """Lists persisted control-plane entities, optionally filtered by entity_type."""
+        async with self._db_manager.session() as session:
+            stmt = select(ControlPlaneEntityORM)
+            if entity_type:
+                stmt = stmt.where(ControlPlaneEntityORM.entity_type == entity_type)
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def delete_persisted_entity(self, entity_type: str, entity_id: str) -> None:
+        """Deletes a persisted control-plane entity."""
+        async with self._db_manager.session() as session:
+            stmt = select(ControlPlaneEntityORM).where(
+                ControlPlaneEntityORM.entity_type == entity_type,
+                ControlPlaneEntityORM.entity_id == entity_id,
+            )
+            existing = (await session.execute(stmt)).scalars().first()
+            if existing:
+                await session.delete(existing)
 
     async def get_system_settings(self) -> SystemSettingsView:
         db_health = await self._db_manager.check_health()

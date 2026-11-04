@@ -72,8 +72,8 @@ flowchart LR
 
 ### Phase 8 — Testing and Production Readiness (Completed)
 - **Prompt 11 (Full System Testing & Audit — Completed)**:
-  - Implemented [`tests/test_system_audit_and_load.py`](file:///c:/Users/vuppa/Documents/projects/model-router/tests/test_system_audit_and_load.py) covering 30-worker concurrent load across shared `AccountGroup` credentials, zero leaked concurrency reservations, cascading multi-provider failure injection/recovery, and SSRF/RBAC/canary-secret non-leakage audits.
-  - Produced [`TEST_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/TEST_REPORT.md), [`SECURITY_AUDIT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/SECURITY_AUDIT.md), [`PERFORMANCE_REPORT.md`](file:///c:/Users/vuppa/Documents/projects/model-router/PERFORMANCE_REPORT.md), and [`KNOWN_LIMITATIONS.md`](file:///c:/Users/vuppa/Documents/projects/model-router/KNOWN_LIMITATIONS.md).
+  - Implemented [`tests/test_system_audit_and_load.py`](./tests/test_system_audit_and_load.py) covering 30-worker concurrent load across shared `AccountGroup` credentials, zero leaked concurrency reservations, cascading multi-provider failure injection/recovery, and SSRF/RBAC/canary-secret non-leakage audits.
+  - Produced [`TEST_REPORT.md`](./TEST_REPORT.md), [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md), [`PERFORMANCE_REPORT.md`](./PERFORMANCE_REPORT.md), and [`KNOWN_LIMITATIONS.md`](./KNOWN_LIMITATIONS.md).
   - **Verification Gate Passed**: All 61 automated tests passing (`pytest -v`).
 
 ### Phase 9 — Documentation and Release (Completed)

@@ -654,3 +654,201 @@ async def test_p3_13_half_open_single_probe_lock_and_metrics_cardinality_cap() -
     # Scrape prometheus output
     output = metrics.format_prometheus_text()
     assert '_other"' in output
+
+
+# =============================================================================
+# Audit Verifications: Control-Plane Entity Persistence, Queue Integrity & Stream Accounting
+# =============================================================================
+@pytest.mark.asyncio
+async def test_admin_control_plane_entity_persistence_crud(tmp_path: Any) -> None:
+    """Verifies ControlPlaneEntityORM persistence, listing by type, update, and deletion."""
+    from pydantic import SecretStr
+    from gateway.admin_api.manager import AdminControlPlaneManager
+    from gateway.core.db import DatabaseManager
+
+    db_file = tmp_path / "ctrl_plane.db"
+    settings = GatewaySettings(
+        database_url=f"sqlite+aiosqlite:///{db_file}",
+        master_kek_base64=SecretStr("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="),
+        admin_bootstrap_token=SecretStr("test_token"),
+    )
+    db_mgr = DatabaseManager(settings)
+    db_mgr.init_engine()
+    admin_mgr = AdminControlPlaneManager(
+        settings=settings,
+        db_manager=db_mgr,
+        redis_manager=MagicMock(),
+    )
+    await admin_mgr.ensure_tables()
+
+    # 1. Persist new entity
+    await admin_mgr.persist_entity("custom_provider", "prov-1", '{"name": "Provider One"}')
+
+    # 2. List entities
+    entities = await admin_mgr.list_persisted_entities("custom_provider")
+    assert len(entities) == 1
+    assert entities[0].entity_id == "prov-1"
+    assert "Provider One" in entities[0].payload_json
+
+    # 3. Update existing entity
+    await admin_mgr.persist_entity("custom_provider", "prov-1", '{"name": "Provider One Updated"}')
+    updated = await admin_mgr.list_persisted_entities("custom_provider")
+    assert len(updated) == 1
+    assert "Provider One Updated" in updated[0].payload_json
+
+    # 4. Delete entity
+    await admin_mgr.delete_persisted_entity("custom_provider", "prov-1")
+    remaining = await admin_mgr.list_persisted_entities("custom_provider")
+    assert len(remaining) == 0
+
+    await db_mgr.dispose()
+
+
+@pytest.mark.asyncio
+async def test_client_key_revoke_invalid_id_raises_not_found(tmp_path: Any) -> None:
+    """Verifies that non-UUID key_id strings cleanly raise ResourceNotFoundError rather than unhandled ValueError."""
+    from pydantic import SecretStr
+    from gateway.admin_api.manager import AdminControlPlaneManager
+    from gateway.core.db import DatabaseManager
+    from gateway.core.exceptions import ResourceNotFoundError
+
+    db_file = tmp_path / "invalid_key.db"
+    settings = GatewaySettings(
+        database_url=f"sqlite+aiosqlite:///{db_file}",
+        master_kek_base64=SecretStr("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="),
+        admin_bootstrap_token=SecretStr("test_token"),
+    )
+    db_mgr = DatabaseManager(settings)
+    db_mgr.init_engine()
+    admin_mgr = AdminControlPlaneManager(
+        settings=settings,
+        db_manager=db_mgr,
+        redis_manager=MagicMock(),
+    )
+    await admin_mgr.ensure_tables()
+
+    with pytest.raises(ResourceNotFoundError):
+        await admin_mgr.revoke_client_key("not-a-valid-uuid")
+
+    with pytest.raises(ResourceNotFoundError):
+        await admin_mgr.delete_client_key("not-a-valid-uuid")
+
+    await db_mgr.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_tracker_write_batch_queue_integrity_on_db_error() -> None:
+    """Verifies that task_done() is invoked in finally block even when db write throws."""
+    from gateway.usage_tracking import UsageTracker
+    from gateway.usage_tracking.models import UsageRecordORM
+
+    failing_db = MagicMock()
+
+    class _BrokenContext:
+        async def __aenter__(self):
+            raise RuntimeError("Database connection suddenly dropped")
+        async def __aexit__(self, *args):
+            pass
+
+    failing_db.session.return_value = _BrokenContext()
+
+    tracker = UsageTracker(db_manager=failing_db, model_registry=MagicMock())
+    # Add an item to the queue
+    item = UsageRecordORM(
+        request_id="req-1",
+        provider_id="openai",
+        model_id="gpt-4o",
+        total_tokens=100,
+    )
+    await tracker._queue.put(item)
+    assert tracker._queue.qsize() == 1
+
+    # Draining batch when DB fails must still call task_done() so join() completes without timeout
+    await tracker.flush()
+    assert tracker._queue.empty()
+    await asyncio.wait_for(tracker._queue.join(), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_instrumented_stream_accounting_usage_and_ttft() -> None:
+    """Verifies _instrumented_stream_accounting accumulates tokens and records telemetry without error."""
+    from collections.abc import AsyncIterator
+    from gateway.protocol_adapters.router import _instrumented_stream_accounting
+    from gateway.core.canonical import CanonicalStreamEvent, TokenUsage
+
+    async def sample_stream() -> AsyncIterator[CanonicalStreamEvent]:
+        yield CanonicalStreamEvent(event_type="text_delta", text="Hello")
+        yield CanonicalStreamEvent(
+            event_type="text_delta",
+            text=" world",
+            usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+        )
+
+    req = MagicMock()
+    req.state = MagicMock()
+    req.state.request_id = "req-stream-1"
+    req.state.client_key = None
+    req.headers = {"X-Request-ID": "req-stream-1"}
+    tracker = MagicMock()
+    tracker.enqueue_usage = MagicMock()
+    tracker.calculate_cost_usd.return_value = 0.0001
+    req.app.state.usage_tracker = tracker
+    req.app.state.metrics_collector = MagicMock()
+
+    events: list[CanonicalStreamEvent] = []
+    stream = _instrumented_stream_accounting(
+        sample_stream(),
+        request=req,
+        provider_id="openai",
+        model_id="gpt-4o",
+        protocol="openai_chat",
+        primary_provider_id="openai",
+        attempt_count=1,
+        fallback_used=False,
+        ttft_ms=None,
+        decision_id="dec-1",
+    )
+    async for ev in stream:
+        events.append(ev)
+
+    assert len(events) == 2
+    assert tracker.enqueue_usage.called
+    recorded_event = tracker.enqueue_usage.call_args[0][0]
+    assert recorded_event.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_probe_lock_cleanup_on_trip() -> None:
+    """Verifies that when a circuit trips from HALF_OPEN to OPEN, the probe_lock key is deleted."""
+    deleted_keys: list[str] = []
+
+    mock_redis = MagicMock()
+    mock_redis.incr = AsyncMock(return_value=5)  # threshold reached
+    mock_redis.expire = AsyncMock(return_value=True)
+    mock_redis.set = AsyncMock(return_value=True)
+    async def mock_del(*keys: str):
+        deleted_keys.extend(keys)
+        return len(keys)
+    mock_redis.delete = mock_del
+    mock_redis.hgetall = AsyncMock(return_value={})
+
+    async def mock_get(key: str) -> str | None:
+        if key.endswith(":state"):
+            return "HALF_OPEN"
+        return None
+    mock_redis.get = mock_get
+
+    redis_mgr = MagicMock()
+    redis_mgr.client = mock_redis
+    monitor = HealthMonitor(
+        redis_manager=redis_mgr,
+        provider_registry=MagicMock(),
+        model_registry=MagicMock(),
+    )
+
+    # Trigger failure that trips circuit
+    await monitor.record_failure(provider_id="openai", error_code="HTTP_500", trip_circuit=True)
+
+    # probe_lock should be explicitly deleted
+    assert any("probe_lock" in k for k in deleted_keys)
+

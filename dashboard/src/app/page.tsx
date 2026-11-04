@@ -3,21 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { GatewayApiClient } from "@/lib/api";
 import {
-  DEMO_ACCOUNT_GROUPS,
-  DEMO_ALIASES,
-  DEMO_CIRCUITS,
-  DEMO_CLIENT_KEYS,
-  DEMO_CREDENTIALS,
-  DEMO_MCP_SERVERS,
-  DEMO_MODELS,
-  DEMO_OVERVIEW,
-  DEMO_POLICIES,
-  DEMO_PROVIDERS,
-  DEMO_REQUEST_LOGS,
-  DEMO_SETTINGS,
-  DEMO_TOOLS,
-} from "@/lib/mockData";
-import {
+  AccountGroupView,
   AdminRole,
   AnalyticsOverview,
   CircuitBreakerView,
@@ -50,6 +36,31 @@ const NAV_ITEMS: { id: DashboardSectionId; label: string; badge?: string }[] = [
   { id: "system_settings", label: "12. System Settings" },
 ];
 
+const EMPTY_OVERVIEW: AnalyticsOverview = {
+  total_requests: 0,
+  successful_requests: 0,
+  failed_requests: 0,
+  success_rate: 1.0,
+  fallback_requests: 0,
+  fallback_rate: 0.0,
+  total_input_tokens: 0,
+  total_output_tokens: 0,
+  total_tokens: 0,
+  total_characters: 0,
+  total_estimated_cost_usd: 0.0,
+  avg_latency_ms: 0,
+  avg_ttft_ms: null,
+};
+
+/**
+ * Deterministic number formatting using fixed 'en-US' locale to prevent
+ * SSR / browser hydration mismatches across different system locales.
+ */
+function formatNumber(val: number | null | undefined): string {
+  if (val === null || val === undefined) return "0";
+  return new Intl.NumberFormat("en-US").format(val);
+}
+
 export default function GatewayDashboardPage() {
   const [activeSection, setActiveSection] =
     useState<DashboardSectionId>("overview");
@@ -57,32 +68,28 @@ export default function GatewayDashboardPage() {
     process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000"
   );
   const [adminToken, setAdminToken] = useState<string>(
-    "change-me-in-production-admin-token"
+    process.env.NEXT_PUBLIC_ADMIN_TOKEN || "ugw_admin_dev_bootstrap_replace_me_in_prod"
   );
   const [adminRole, setAdminRole] = useState<AdminRole>("SUPER_ADMIN");
-  const [dataSource, setDataSource] = useState<DataSourceMode>("DEMO_FALLBACK");
+  const [dataSource, setDataSource] = useState<DataSourceMode>("LIVE_BACKEND");
   const [statusBanner, setStatusBanner] = useState<string>(
-    "Initialized with explicit Demo Dataset. Click 'Sync Live Gateway' to connect to FastAPI backend."
+    "Connecting to Universal AI Gateway..."
   );
 
-  // State across all 12 operational domains
-  const [overview, setOverview] = useState<AnalyticsOverview>(DEMO_OVERVIEW);
-  const [providers, setProviders] = useState<ProviderSummary[]>(DEMO_PROVIDERS);
-  const [credentials, setCredentials] =
-    useState<CredentialPublicView[]>(DEMO_CREDENTIALS);
-  const [models, setModels] = useState<ModelMetadataView[]>(DEMO_MODELS);
-  const [aliases, setAliases] = useState<ModelAliasView[]>(DEMO_ALIASES);
-  const [policies, setPolicies] = useState<RoutingPolicyView[]>(DEMO_POLICIES);
-  const [clientKeys, setClientKeys] =
-    useState<ClientApiKeyView[]>(DEMO_CLIENT_KEYS);
-  const [requestLogs, setRequestLogs] =
-    useState<UsageRecordView[]>(DEMO_REQUEST_LOGS);
-  const [tools, setTools] = useState<ToolSpecView[]>(DEMO_TOOLS);
-  const [mcpServers, setMcpServers] =
-    useState<MCPServerView[]>(DEMO_MCP_SERVERS);
-  const [circuits, setCircuits] = useState<CircuitBreakerView[]>(DEMO_CIRCUITS);
-  const [systemSettings, setSystemSettings] =
-    useState<SystemSettingsView>(DEMO_SETTINGS);
+  // State across all 12 operational domains — all initialized empty from live API
+  const [overview, setOverview] = useState<AnalyticsOverview>(EMPTY_OVERVIEW);
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [credentials, setCredentials] = useState<CredentialPublicView[]>([]);
+  const [accountGroups, setAccountGroups] = useState<AccountGroupView[]>([]);
+  const [models, setModels] = useState<ModelMetadataView[]>([]);
+  const [aliases, setAliases] = useState<ModelAliasView[]>([]);
+  const [policies, setPolicies] = useState<RoutingPolicyView[]>([]);
+  const [clientKeys, setClientKeys] = useState<ClientApiKeyView[]>([]);
+  const [requestLogs, setRequestLogs] = useState<UsageRecordView[]>([]);
+  const [tools, setTools] = useState<ToolSpecView[]>([]);
+  const [mcpServers, setMcpServers] = useState<MCPServerView[]>([]);
+  const [circuits, setCircuits] = useState<CircuitBreakerView[]>([]);
+  const [systemSettings, setSystemSettings] = useState<SystemSettingsView | null>(null);
 
   // Interactive form states
   const [simAlias, setSimAlias] = useState<string>("coding");
@@ -130,39 +137,41 @@ export default function GatewayDashboardPage() {
         apiClient.fetchCircuitBreakers(),
       ]);
 
-      setOverview(liveOverview);
-      setProviders(liveProviders);
-      setModels(liveModels);
-      setAliases(liveAliases);
-      setPolicies(livePolicies);
-      setRequestLogs(liveLogs);
-      setTools(liveTools);
-      setMcpServers(liveMcp);
-      setCircuits(liveCircuits);
+      setOverview(liveOverview ?? EMPTY_OVERVIEW);
+      setProviders(Array.isArray(liveProviders) ? liveProviders : []);
+      setModels(Array.isArray(liveModels) ? liveModels : []);
+      setAliases(Array.isArray(liveAliases) ? liveAliases : []);
+      setPolicies(Array.isArray(livePolicies) ? livePolicies : []);
+      setRequestLogs(Array.isArray(liveLogs) ? liveLogs : []);
+      setTools(Array.isArray(liveTools) ? liveTools : []);
+      setMcpServers(Array.isArray(liveMcp) ? liveMcp : []);
+      setCircuits(Array.isArray(liveCircuits) ? liveCircuits : []);
 
       try {
-        const [liveCreds, liveClientKeys, liveSettings] = await Promise.all([
+        const [liveCreds, liveClientKeys, liveSettings, liveAccountGroups] = await Promise.all([
           apiClient.fetchCredentials(),
           apiClient.fetchClientKeys(),
           apiClient.fetchSystemSettings(),
+          apiClient.fetchAccountGroups(),
         ]);
-        setCredentials(liveCreds);
-        setClientKeys(liveClientKeys);
-        setSystemSettings(liveSettings);
-      } catch {
-        // Admin endpoints require valid X-Gateway-Admin-Token
+        setCredentials(Array.isArray(liveCreds) ? liveCreds : []);
+        setClientKeys(Array.isArray(liveClientKeys) ? liveClientKeys : []);
+        if (liveSettings) setSystemSettings(liveSettings);
+        setAccountGroups(Array.isArray(liveAccountGroups) ? liveAccountGroups : []);
+      } catch (adminErr) {
+        console.warn("Admin endpoints error:", adminErr);
       }
 
       setDataSource("LIVE_BACKEND");
       setStatusBanner(
-        `Connected to Live FastAPI Backend at ${gatewayUrl} (Role: ${adminRole})`
+        `Connected to Live Gateway at ${gatewayUrl} (Role: ${adminRole})`
       );
     } catch (err) {
       setDataSource("DEMO_FALLBACK");
       setStatusBanner(
-        `Live backend unreachable (${
-          err instanceof Error ? err.message : "connection error"
-        }) — displaying explicit DEMO_FALLBACK data.`
+        `Unable to reach Gateway backend at ${gatewayUrl} (${
+          err instanceof Error ? err.message : "connection refused"
+        }). Ensure the gateway is running on port 8000.`
       );
     }
   }, [apiClient, gatewayUrl, adminRole]);
@@ -172,130 +181,61 @@ export default function GatewayDashboardPage() {
   }, [syncLiveBackend]);
 
   const handleSimulateRoute = async () => {
-    if (dataSource === "LIVE_BACKEND") {
-      try {
-        const trace = await apiClient.simulateRouting({
-          requested_model: simAlias,
-          policy_name: simPolicy,
-        });
-        setSimTraceResult(JSON.stringify(trace, null, 2));
-        return;
-      } catch (e) {
-        setSimTraceResult(
-          `Simulation error: ${e instanceof Error ? e.message : String(e)}`
-        );
-        return;
-      }
+    try {
+      const trace = await apiClient.simulateRouting({
+        requested_model: simAlias,
+        policy_name: simPolicy,
+      });
+      setSimTraceResult(JSON.stringify(trace, null, 2));
+    } catch (e) {
+      setSimTraceResult(
+        `Simulation error: ${e instanceof Error ? e.message : String(e)}`
+      );
     }
-    setSimTraceResult(
-      JSON.stringify(
-        {
-          mode: "DEMO_FALLBACK_SIMULATION",
-          requested_model_or_alias: simAlias,
-          applied_policy: simPolicy,
-          selected_provider:
-            simAlias === "coding"
-              ? "anthropic"
-              : simAlias === "fast"
-              ? "groq"
-              : "openai",
-          selected_model:
-            simAlias === "coding"
-              ? "anthropic/claude-3-7-sonnet-20250219"
-              : simAlias === "fast"
-              ? "groq/llama-3.3-70b-versatile"
-              : "openai/gpt-4o",
-          weights:
-            policies.find((p) => p.name === simPolicy)?.weights ||
-            DEMO_POLICIES[0].weights,
-        },
-        null,
-        2
-      )
-    );
   };
 
   const handleCreateClientKey = async () => {
     if (!canMutate || !newKeyName.trim()) return;
-    if (dataSource === "LIVE_BACKEND") {
-      try {
-        const created = await apiClient.createClientKey({
-          name: newKeyName.trim(),
-          role: "CLIENT",
-          rate_limit_rpm: newKeyRpm,
-        });
-        setNewlyIssuedRawKey(created.api_key || null);
-        setClientKeys((prev) => [created, ...prev]);
-        setNewKeyName("");
-        return;
-      } catch (err) {
-        alert(
-          `Failed to create key: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
-        return;
-      }
+    try {
+      const created = await apiClient.createClientKey({
+        name: newKeyName.trim(),
+        role: "CLIENT",
+        rate_limit_rpm: newKeyRpm,
+        monthly_budget_usd: 100,
+      });
+      setNewlyIssuedRawKey(created.api_key || null);
+      setClientKeys((prev) => [created, ...(prev || [])]);
+      setNewKeyName("");
+      setStatusBanner(`Created live API client key: ${created.name}`);
+    } catch (err) {
+      alert(
+        `Failed to create client key: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
     }
-    const demoKey = `ugw_live_demo_${Math.random().toString(36).slice(2, 14)}`;
-    const entry: ClientApiKeyView = {
-      id: `key-${Date.now()}`,
-      name: newKeyName.trim(),
-      key_prefix: `${demoKey.slice(0, 14)}...`,
-      role: "CLIENT",
-      allowed_providers: ["openai", "anthropic", "gemini"],
-      allowed_tools: [],
-      rate_limit_rpm: newKeyRpm,
-      monthly_budget_usd: 100,
-      enabled: true,
-      created_at: new Date().toISOString(),
-    };
-    setNewlyIssuedRawKey(demoKey);
-    setClientKeys((prev) => [entry, ...prev]);
-    setNewKeyName("");
   };
 
   const handleCreateCredential = async () => {
     if (!canMutate || !newCredLabel.trim() || !newCredSecret.trim()) return;
-    if (dataSource === "LIVE_BACKEND") {
-      try {
-        const created = await apiClient.createCredential({
-          provider_id: newCredProvider,
-          label: newCredLabel.trim(),
-          secret: newCredSecret.trim(),
-          weight: 100,
-        });
-        setCredentials((prev) => [created, ...prev]);
-        setNewCredLabel("");
-        setNewCredSecret("");
-        return;
-      } catch (err) {
-        alert(
-          `Failed to store encrypted credential: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
-        return;
-      }
+    try {
+      const created = await apiClient.createCredential({
+        provider_id: newCredProvider,
+        label: newCredLabel.trim(),
+        secret: newCredSecret.trim(),
+        weight: 100,
+      });
+      setCredentials((prev) => [created, ...(prev || [])]);
+      setNewCredLabel("");
+      setNewCredSecret("");
+      setStatusBanner(`Stored encrypted credential: ${created.label}`);
+    } catch (err) {
+      alert(
+        `Failed to store encrypted credential: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
     }
-    const masked = `${newCredSecret.slice(0, 4)}...${newCredSecret.slice(-4)}`;
-    const demoCred: CredentialPublicView = {
-      id: `cred-${Date.now()}`,
-      provider_id: newCredProvider,
-      label: newCredLabel.trim(),
-      masked_hint: masked,
-      status: "ACTIVE",
-      weight: 100,
-      priority: 1,
-      account_group_id: null,
-      rpm_limit: 5000,
-      tpm_limit: 2000000,
-      max_concurrency: 50,
-      health_score: 1.0,
-    };
-    setCredentials((prev) => [demoCred, ...prev]);
-    setNewCredLabel("");
-    setNewCredSecret("");
   };
 
   const renderBadge = (state: string) => {
@@ -427,7 +367,7 @@ export default function GatewayDashboardPage() {
               <div className="p-4 rounded-lg bg-[#111827] border border-gray-800">
                 <div className="text-xs text-gray-400">Total Requests</div>
                 <div className="text-2xl font-bold mt-1">
-                  {overview.total_requests.toLocaleString()}
+                  {formatNumber(overview.total_requests)}
                 </div>
                 <div className="text-xs text-emerald-400 mt-1">
                   {(overview.success_rate * 100).toFixed(2)}% Success Rate
@@ -438,7 +378,7 @@ export default function GatewayDashboardPage() {
                   Fallback Executions
                 </div>
                 <div className="text-2xl font-bold mt-1">
-                  {overview.fallback_requests.toLocaleString()}
+                  {formatNumber(overview.fallback_requests)}
                 </div>
                 <div className="text-xs text-amber-400 mt-1">
                   {(overview.fallback_rate * 100).toFixed(2)}% of traffic
@@ -449,7 +389,7 @@ export default function GatewayDashboardPage() {
                   Total Tokens Processed
                 </div>
                 <div className="text-2xl font-bold mt-1">
-                  {overview.total_tokens.toLocaleString()}
+                  {formatNumber(overview.total_tokens)}
                 </div>
                 <div className="text-xs text-gray-400 mt-1">
                   Est. Cost: ${overview.total_estimated_cost_usd.toFixed(4)}
@@ -486,15 +426,23 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {circuits.map((c) => (
-                    <tr key={`${c.scope}:${c.target_id}`}>
-                      <td className="py-2 font-mono text-xs">{c.scope}</td>
-                      <td className="py-2 font-medium">{c.target_id}</td>
-                      <td className="py-2">{renderBadge(c.state)}</td>
-                      <td className="py-2">{c.failure_count}</td>
-                      <td className="py-2">{renderBadge(c.health_status)}</td>
+                  {circuits.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-xs text-gray-500">
+                        All circuits are healthy (or initializing). Circuit trips and health status are tracked here in real time.
+                      </td>
                     </tr>
-                  ))}
+                  ) : (
+                    circuits.map((c) => (
+                      <tr key={`${c.scope}:${c.target_id}`}>
+                        <td className="py-2 font-mono text-xs">{c.scope}</td>
+                        <td className="py-2 font-medium">{c.target_id}</td>
+                        <td className="py-2">{renderBadge(c.state)}</td>
+                        <td className="py-2">{c.failure_count}</td>
+                        <td className="py-2">{renderBadge(c.health_status)}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -512,7 +460,7 @@ export default function GatewayDashboardPage() {
               UNKNOWN. Missing capabilities are never fabricated.
             </p>
             <div className="grid grid-cols-1 gap-4">
-              {providers.map((p) => (
+              {(providers || []).map((p) => (
                 <div
                   key={p.provider_id}
                   className="p-5 rounded-lg bg-[#111827] border border-gray-800 space-y-3"
@@ -563,7 +511,7 @@ export default function GatewayDashboardPage() {
                     onChange={(e) => setNewCredProvider(e.target.value)}
                     className="rounded bg-gray-900 border border-gray-700 px-3 py-2 text-sm"
                   >
-                    {providers.map((p) => (
+                    {(providers || []).map((p) => (
                       <option key={p.provider_id} value={p.provider_id}>
                         {p.display_name}
                       </option>
@@ -610,23 +558,31 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {credentials.map((c) => (
-                    <tr key={c.id}>
-                      <td className="py-2 font-mono">{c.provider_id}</td>
-                      <td className="py-2 font-medium">{c.label}</td>
-                      <td className="py-2 font-mono text-xs text-gray-400">
-                        {c.masked_hint}
-                      </td>
-                      <td className="py-2">{renderBadge(c.status)}</td>
-                      <td className="py-2">{c.weight}</td>
-                      <td className="py-2 font-mono text-xs">
-                        {c.account_group_id || "independent"}
-                      </td>
-                      <td className="py-2 text-xs">
-                        {c.rpm_limit ?? "∞"} RPM / {c.tpm_limit ?? "∞"} TPM
+                  {credentials.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-xs text-gray-500">
+                        No credentials registered yet. Register your upstream provider API keys above or via POST /api/v1/admin/credentials.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    credentials.map((c) => (
+                      <tr key={c.id}>
+                        <td className="py-2 font-mono">{c.provider_id}</td>
+                        <td className="py-2 font-medium">{c.label}</td>
+                        <td className="py-2 font-mono text-xs text-gray-400">
+                          {c.masked_hint}
+                        </td>
+                        <td className="py-2">{renderBadge(c.status)}</td>
+                        <td className="py-2">{c.weight}</td>
+                        <td className="py-2 font-mono text-xs">
+                          {c.account_group_id || "independent"}
+                        </td>
+                        <td className="py-2 text-xs">
+                          {c.rpm_limit ?? "∞"} RPM / {c.tpm_limit ?? "∞"} TPM
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -640,24 +596,30 @@ export default function GatewayDashboardPage() {
                 share account-level rate limits and cooldowns.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {DEMO_ACCOUNT_GROUPS.map((ag) => (
-                  <div
-                    key={ag.id}
-                    className="p-3 rounded bg-gray-900 border border-gray-800 text-xs space-y-1"
-                  >
-                    <div className="font-semibold text-sm text-white">
-                      {ag.name}
-                    </div>
-                    <div className="text-gray-400">
-                      Provider:{" "}
-                      <span className="font-mono text-gray-200">
-                        {ag.provider_id}
-                      </span>{" "}
-                      • Shared RPM: {ag.shared_rpm_limit} • Shared TPM:{" "}
-                      {ag.shared_tpm_limit?.toLocaleString()}
-                    </div>
+                {accountGroups.length === 0 ? (
+                  <div className="col-span-2 p-6 rounded bg-gray-900 border border-gray-800 text-center text-xs text-gray-400">
+                    No shared account groups configured. Register groups via POST /api/v1/admin/account-groups.
                   </div>
-                ))}
+                ) : (
+                  accountGroups.map((ag) => (
+                    <div
+                      key={ag.id}
+                      className="p-3 rounded bg-gray-900 border border-gray-800 text-xs space-y-1"
+                    >
+                      <div className="font-semibold text-sm text-white">
+                        {ag.name}
+                      </div>
+                      <div className="text-gray-400">
+                        Provider:{" "}
+                        <span className="font-mono text-gray-200">
+                          {ag.provider_id}
+                        </span>{" "}
+                        • Shared RPM: {ag.shared_rpm_limit} • Shared TPM:{" "}
+                        {formatNumber(ag.shared_tpm_limit)}
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </section>
@@ -674,7 +636,7 @@ export default function GatewayDashboardPage() {
                 Semantic Routing Aliases (10 Built-in Aliases)
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {aliases.map((a) => (
+                {(aliases || []).map((a) => (
                   <div
                     key={a.alias}
                     className="p-3 rounded bg-gray-900 border border-gray-800 flex items-center justify-between"
@@ -711,14 +673,14 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {models.map((m) => (
+                  {(models || []).map((m) => (
                     <tr key={m.model_id}>
                       <td className="py-2 font-mono font-medium">
                         {m.model_id}
                       </td>
                       <td className="py-2 text-xs">
                         {m.context_length
-                          ? `${m.context_length.toLocaleString()} tok`
+                          ? `${formatNumber(m.context_length)} tok`
                           : "UNKNOWN"}
                       </td>
                       <td className="py-2 text-xs">
@@ -750,7 +712,7 @@ export default function GatewayDashboardPage() {
               5. Routing Policy Engine & Explainability Simulator
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {policies.map((p) => (
+              {(policies || []).map((p) => (
                 <div
                   key={p.name}
                   className="p-4 rounded-lg bg-[#111827] border border-gray-800 space-y-2"
@@ -765,7 +727,7 @@ export default function GatewayDashboardPage() {
                   </div>
                   <p className="text-xs text-gray-400">{p.description}</p>
                   <div className="grid grid-cols-5 gap-1 pt-2 text-center text-xs">
-                    {Object.entries(p.weights).map(([k, v]) => (
+                    {Object.entries(p.weights || {}).map(([k, v]) => (
                       <div
                         key={k}
                         className="bg-gray-900 p-1.5 rounded border border-gray-800"
@@ -798,7 +760,7 @@ export default function GatewayDashboardPage() {
                   onChange={(e) => setSimPolicy(e.target.value)}
                   className="rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-sm"
                 >
-                  {policies.map((p) => (
+                  {(policies || []).map((p) => (
                     <option key={p.name} value={p.name}>
                       Policy: {p.name}
                     </option>
@@ -878,19 +840,27 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {clientKeys.map((k) => (
-                    <tr key={k.id}>
-                      <td className="py-2 font-medium">{k.name}</td>
-                      <td className="py-2 font-mono text-xs text-gray-400">
-                        {k.key_prefix}
-                      </td>
-                      <td className="py-2 font-mono text-xs">{k.role}</td>
-                      <td className="py-2">{k.rate_limit_rpm} RPM</td>
-                      <td className="py-2">
-                        {renderBadge(k.enabled ? "ACTIVE" : "REVOKED")}
+                  {clientKeys.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-xs text-gray-500">
+                        No client API keys issued yet. Generate a client key above or via POST /api/v1/admin/client-keys.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    clientKeys.map((k) => (
+                      <tr key={k.id}>
+                        <td className="py-2 font-medium">{k.name}</td>
+                        <td className="py-2 font-mono text-xs text-gray-400">
+                          {k.key_prefix}
+                        </td>
+                        <td className="py-2 font-mono text-xs">{k.role}</td>
+                        <td className="py-2">{k.rate_limit_rpm} RPM</td>
+                        <td className="py-2">
+                          {renderBadge(k.enabled ? "ACTIVE" : "REVOKED")}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -907,13 +877,13 @@ export default function GatewayDashboardPage() {
               <div className="p-4 rounded-lg bg-[#111827] border border-gray-800">
                 <div className="text-xs text-gray-400">Input Tokens</div>
                 <div className="text-xl font-bold mt-1">
-                  {overview.total_input_tokens.toLocaleString()}
+                  {formatNumber(overview.total_input_tokens)}
                 </div>
               </div>
               <div className="p-4 rounded-lg bg-[#111827] border border-gray-800">
                 <div className="text-xs text-gray-400">Output Tokens</div>
                 <div className="text-xl font-bold mt-1">
-                  {overview.total_output_tokens.toLocaleString()}
+                  {formatNumber(overview.total_output_tokens)}
                 </div>
               </div>
               <div className="p-4 rounded-lg bg-[#111827] border border-gray-800">
@@ -947,28 +917,36 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {requestLogs.map((r) => (
-                    <tr key={r.id}>
-                      <td className="py-2 font-mono text-xs">
-                        {r.request_id.slice(0, 12)}...
+                  {requestLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-xs text-gray-500">
+                        No requests recorded yet. Send your first chat completion to <code className="text-blue-400">/v1/chat/completions</code> to view live request telemetry.
                       </td>
-                      <td className="py-2 font-mono text-xs">
-                        {r.provider_id}/{r.model_id}
-                      </td>
-                      <td className="py-2 text-xs">
-                        {r.integration_mode} ({r.protocol})
-                      </td>
-                      <td className="py-2 text-xs">
-                        {r.attempt_count} att •{" "}
-                        {r.fallback_used ? "FALLBACK" : "PRIMARY"}
-                      </td>
-                      <td className="py-2 text-xs font-mono">
-                        {r.total_tokens} tok (${r.estimated_cost_usd.toFixed(5)}
-                        )
-                      </td>
-                      <td className="py-2 text-xs">{r.latency_ms} ms</td>
                     </tr>
-                  ))}
+                  ) : (
+                    requestLogs.map((r) => (
+                      <tr key={r.id}>
+                        <td className="py-2 font-mono text-xs">
+                          {r.request_id.slice(0, 12)}...
+                        </td>
+                        <td className="py-2 font-mono text-xs">
+                          {r.provider_id}/{r.model_id}
+                        </td>
+                        <td className="py-2 text-xs">
+                          {r.integration_mode} ({r.protocol})
+                        </td>
+                        <td className="py-2 text-xs">
+                          {r.attempt_count} att •{" "}
+                          {r.fallback_used ? "FALLBACK" : "PRIMARY"}
+                        </td>
+                        <td className="py-2 text-xs font-mono">
+                          {r.total_tokens} tok (${r.estimated_cost_usd.toFixed(5)}
+                          )
+                        </td>
+                        <td className="py-2 text-xs">{r.latency_ms} ms</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -993,7 +971,7 @@ export default function GatewayDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {tools.map((t) => (
+                  {(tools || []).map((t) => (
                     <tr key={t.name}>
                       <td className="py-2 font-mono font-medium">{t.name}</td>
                       <td className="py-2 font-mono text-xs">
@@ -1021,7 +999,7 @@ export default function GatewayDashboardPage() {
               10. Model Context Protocol (MCP) Server Connections
             </h2>
             <div className="grid grid-cols-1 gap-4">
-              {mcpServers.map((s) => (
+              {(mcpServers || []).map((s) => (
                 <div
                   key={s.server_id}
                   className="p-4 rounded-lg bg-[#111827] border border-gray-800 flex items-center justify-between"
@@ -1103,19 +1081,19 @@ export default function GatewayDashboardPage() {
                 <div className="p-3 rounded bg-gray-900 border border-gray-800">
                   <div className="text-gray-400">Encryption</div>
                   <div className="font-mono font-semibold mt-1">
-                    {systemSettings.encryption_algorithm}
+                    {systemSettings?.encryption_algorithm || "AES-256-GCM"}
                   </div>
                 </div>
                 <div className="p-3 rounded bg-gray-900 border border-gray-800">
                   <div className="text-gray-400">Database Dialect</div>
                   <div className="font-mono font-semibold mt-1">
-                    {systemSettings.database_dialect}
+                    {systemSettings?.database_dialect || "PostgreSQL / SQLite"}
                   </div>
                 </div>
                 <div className="p-3 rounded bg-gray-900 border border-gray-800">
                   <div className="text-gray-400">Redis Backend</div>
                   <div className="font-mono font-semibold mt-1">
-                    {systemSettings.redis_backend}
+                    {systemSettings?.redis_backend || "Coordinated (or In-Memory)"}
                   </div>
                 </div>
                 <div className="p-3 rounded bg-gray-900 border border-gray-800">

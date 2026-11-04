@@ -2,6 +2,9 @@
   "name": "universal-ai-gateway-dashboard",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "description": "Next.js + TypeScript + Tailwind CSS Operational Management Dashboard for Universal AI Gateway",
   "scripts": {
     "dev": "next dev -p 3000",

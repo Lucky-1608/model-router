@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from gateway.capability_registry.models import QuotaScopeType
 from gateway.core.canonical import RateLimitSnapshot, TokenUsage
-from gateway.core.redis import InMemoryRedisFallback, RedisManager
+from gateway.core.redis import RedisManager
 
 if TYPE_CHECKING:
     from gateway.credential_manager.models import QuotaConfigSpec

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 import time
+from typing import Any
 
 from gateway.core.canonical import (
     AdapterCredential,
@@ -369,8 +370,8 @@ class RetryFallbackEngine:
                         account_group_id=managed_lease.account_group_id,
                     )
                 async def _empty_gen() -> AsyncIterator[CanonicalStreamEvent]:
-                    if False:
-                        yield first_event
+                    return
+                    yield  # type: ignore[unreachable]
                 return _empty_gen(), cand_provider, cand_model_id, attempts
             except GatewayError as exc:
                 if managed_lease is not None and self._credential_manager is not None:
@@ -429,6 +430,7 @@ class RetryFallbackEngine:
                 mid: str,
                 ttft: float,
                 active_lease: Any = managed_lease,
+                stream_start_ts: float = start_ts,
             ) -> AsyncIterator[CanonicalStreamEvent]:
                 bytes_sent = 1
                 accumulated_usage = TokenUsage()
@@ -441,7 +443,7 @@ class RetryFallbackEngine:
                             accumulated_usage.output_tokens = max(accumulated_usage.output_tokens, ev.usage.output_tokens)
                             accumulated_usage.total_tokens = max(accumulated_usage.total_tokens, ev.usage.total_tokens)
                         yield ev
-                    total_ms = round((time.perf_counter() - start_ts) * 1000.0, 2)
+                    total_ms = round((time.perf_counter() - stream_start_ts) * 1000.0, 2)
                     await self._health_monitor.record_success(
                         provider_id=prov,
                         model_id=mid,

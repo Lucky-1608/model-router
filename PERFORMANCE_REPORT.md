@@ -20,7 +20,7 @@ Performance and concurrency evaluations were executed against the in-process ASG
 
 ## 3. Concurrent Load & Reservation Release Verification
 
-In [`tests/test_system_audit_and_load.py`](file:///c:/Users/vuppa/Documents/projects/model-router/tests/test_system_audit_and_load.py#L31-L108) (`test_concurrent_load_credential_rotation_and_quota_release`):
+In [`tests/test_system_audit_and_load.py`](./tests/test_system_audit_and_load.py) (`test_concurrent_load_credential_rotation_and_quota_release`):
 - **Workload**: 30 concurrent async requests fired simultaneously via `asyncio.gather` against a 3-credential pool belonging to a shared `AccountGroup` (`shared_max_concurrency=50`, per-credential `max_concurrency=20`).
 - **Results**:
   - **100% success rate** (30/30 requests completed without race conditions or deadlocks).

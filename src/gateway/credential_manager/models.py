@@ -8,7 +8,7 @@ from typing import Any
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from gateway.capability_registry.models import QuotaScopeType

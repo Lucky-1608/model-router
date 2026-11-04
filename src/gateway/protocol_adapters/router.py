@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 import json
 import time
 from typing import Any
@@ -16,6 +17,7 @@ from gateway.core.auth import (
 )
 from gateway.core.canonical import (
     CanonicalInternalRequest,
+    CanonicalStreamEvent,
     NativePassthroughRequest,
     TokenUsage,
 )

@@ -56,13 +56,14 @@ class UsageTracker:
         """Drains the queue and terminates the background worker cleanly."""
         self._stopping = True
         if self._worker_task is not None:
-            await self.flush()
             self._worker_task.cancel()
             try:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+        # Drain any residual queued records on shutdown
+        await self.flush()
 
     async def flush(self) -> None:
         """Drains all currently queued records and commits them in batches."""
@@ -89,10 +90,11 @@ class UsageTracker:
         try:
             async with self._db_manager.session() as session:
                 session.add_all(batch)
-            for _ in batch:
-                self._queue.task_done()
         except Exception as exc:
             logger.error("usage_batch_insert_failed", count=len(batch), error=str(exc))
+        finally:
+            for _ in batch:
+                self._queue.task_done()
 
     async def ensure_tables(self) -> None:
         """Creates the gateway_usage_records table if not present."""
