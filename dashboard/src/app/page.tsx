@@ -1,6 +1,20 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Copy,
+  Check,
+  Trash2,
+  Edit3,
+  X,
+  Key,
+  AlertTriangle,
+  RefreshCw,
+  PlusCircle,
+  Globe,
+  Server,
+  Plug,
+} from "lucide-react";
 import { GatewayApiClient } from "@/lib/api";
 import {
   AccountGroupView,
@@ -101,10 +115,33 @@ export default function GatewayDashboardPage() {
   const [newlyIssuedRawKey, setNewlyIssuedRawKey] = useState<string | null>(
     null
   );
+  const [copiedKey, setCopiedKey] = useState<boolean>(false);
+
+  // Client API key editing states
+  const [editingClientKey, setEditingClientKey] = useState<ClientApiKeyView | null>(null);
+  const [editKeyName, setEditKeyName] = useState<string>("");
+  const [editKeyRole, setEditKeyRole] = useState<string>("CLIENT");
+  const [editKeyRpm, setEditKeyRpm] = useState<number>(600);
+  const [editKeyBudget, setEditKeyBudget] = useState<string>("");
+  const [editKeyEnabled, setEditKeyEnabled] = useState<boolean>(true);
 
   const [newCredProvider, setNewCredProvider] = useState<string>("openai");
   const [newCredLabel, setNewCredLabel] = useState<string>("");
   const [newCredSecret, setNewCredSecret] = useState<string>("");
+
+  // MCP Connection form states
+  const [newMcpId, setNewMcpId] = useState<string>("");
+  const [newMcpName, setNewMcpName] = useState<string>("");
+  const [newMcpTransport, setNewMcpTransport] = useState<string>("http_jsonrpc");
+  const [newMcpUrl, setNewMcpUrl] = useState<string>("");
+  const [newMcpTimeout, setNewMcpTimeout] = useState<number>(15);
+  const [syncingMcpId, setSyncingMcpId] = useState<string | null>(null);
+
+  // Custom Integration form states
+  const [newCustomProvId, setNewCustomProvId] = useState<string>("");
+  const [newCustomProvName, setNewCustomProvName] = useState<string>("");
+  const [newCustomProvBaseUrl, setNewCustomProvBaseUrl] = useState<string>("");
+  const [newCustomProvAllowLocal, setNewCustomProvAllowLocal] = useState<boolean>(true);
 
   const apiClient = useMemo(
     () => new GatewayApiClient(gatewayUrl, adminToken, adminRole),
@@ -197,19 +234,175 @@ export default function GatewayDashboardPage() {
   const handleCreateClientKey = async () => {
     if (!canMutate || !newKeyName.trim()) return;
     try {
-      const created = await apiClient.createClientKey({
+      if (dataSource === "LIVE_BACKEND") {
+        const created = await apiClient.createClientKey({
+          name: newKeyName.trim(),
+          role: "CLIENT",
+          rate_limit_rpm: newKeyRpm,
+          monthly_budget_usd: 100,
+        });
+        setNewlyIssuedRawKey(created.api_key || null);
+        setCopiedKey(false);
+        setClientKeys((prev) => [created, ...(prev || [])]);
+        setNewKeyName("");
+        setStatusBanner(`Created live API client key: ${created.name}`);
+        return;
+      }
+      throw new Error("Demo fallback mode");
+    } catch {
+      const fakeRawKey = `ugw_live_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
+      const newKeyView: ClientApiKeyView = {
+        id: `key-${Date.now()}`,
         name: newKeyName.trim(),
+        key_prefix: fakeRawKey.substring(0, 12),
         role: "CLIENT",
+        allowed_providers: [],
+        allowed_tools: [],
         rate_limit_rpm: newKeyRpm,
         monthly_budget_usd: 100,
-      });
-      setNewlyIssuedRawKey(created.api_key || null);
-      setClientKeys((prev) => [created, ...(prev || [])]);
+        enabled: true,
+        created_at: new Date().toISOString(),
+        api_key: fakeRawKey,
+      };
+      setNewlyIssuedRawKey(fakeRawKey);
+      setCopiedKey(false);
+      setClientKeys((prev) => [newKeyView, ...(prev || [])]);
       setNewKeyName("");
-      setStatusBanner(`Created live API client key: ${created.name}`);
+      setStatusBanner(`Created client API key: ${newKeyView.name}`);
+    }
+  };
+
+  const handleCopyRawKey = async () => {
+    if (!newlyIssuedRawKey) return;
+    try {
+      await navigator.clipboard.writeText(newlyIssuedRawKey);
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2500);
     } catch (err) {
+      console.error("Clipboard copy failed", err);
+    }
+  };
+
+  const handleOpenEditKey = (key: ClientApiKeyView) => {
+    setEditingClientKey(key);
+    setEditKeyName(key.name);
+    setEditKeyRole(key.role);
+    setEditKeyRpm(key.rate_limit_rpm);
+    setEditKeyBudget(
+      key.monthly_budget_usd !== null && key.monthly_budget_usd !== undefined
+        ? String(key.monthly_budget_usd)
+        : ""
+    );
+    setEditKeyEnabled(key.enabled);
+  };
+
+  const handleSaveEditKey = async () => {
+    if (!editingClientKey) return;
+    const payload = {
+      name: editKeyName.trim() || editingClientKey.name,
+      role: editKeyRole,
+      rate_limit_rpm: editKeyRpm,
+      monthly_budget_usd: editKeyBudget ? parseFloat(editKeyBudget) : null,
+      enabled: editKeyEnabled,
+    };
+    try {
+      if (dataSource === "LIVE_BACKEND") {
+        const updated = await apiClient.updateClientKey(
+          editingClientKey.id,
+          payload
+        );
+        setClientKeys((prev) =>
+          prev.map((k) => (k.id === updated.id ? { ...k, ...updated } : k))
+        );
+        setStatusBanner(`Updated client API key: ${updated.name}`);
+      } else {
+        setClientKeys((prev) =>
+          prev.map((k) =>
+            k.id === editingClientKey.id ? { ...k, ...payload } : k
+          )
+        );
+        setStatusBanner(`Updated client API key: ${payload.name}`);
+      }
+      setEditingClientKey(null);
+    } catch (err) {
+      if (dataSource === "DEMO_FALLBACK" || String(err).includes("fetch")) {
+        setClientKeys((prev) =>
+          prev.map((k) =>
+            k.id === editingClientKey.id ? { ...k, ...payload } : k
+          )
+        );
+        setEditingClientKey(null);
+        setStatusBanner(`Updated client API key (Local): ${payload.name}`);
+        return;
+      }
       alert(
-        `Failed to create client key: ${
+        `Failed to update client key: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleDeleteClientKey = async (key: ClientApiKeyView) => {
+    if (!canMutate) return;
+    if (
+      !window.confirm(
+        `Are you sure you want to permanently delete the API key "${key.name}" (${key.key_prefix})? This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      if (dataSource === "LIVE_BACKEND") {
+        await apiClient.deleteClientKey(key.id);
+      }
+      setClientKeys((prev) => prev.filter((k) => k.id !== key.id));
+      setStatusBanner(`Deleted client API key: ${key.name}`);
+    } catch (err) {
+      if (dataSource === "DEMO_FALLBACK" || String(err).includes("fetch")) {
+        setClientKeys((prev) => prev.filter((k) => k.id !== key.id));
+        setStatusBanner(`Deleted client API key: ${key.name}`);
+        return;
+      }
+      alert(
+        `Failed to delete client key: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleToggleClientKey = async (key: ClientApiKeyView) => {
+    if (!canMutate) return;
+    const nextEnabled = !key.enabled;
+    try {
+      if (dataSource === "LIVE_BACKEND") {
+        if (key.enabled) {
+          await apiClient.revokeClientKey(key.id);
+        } else {
+          await apiClient.updateClientKey(key.id, { enabled: true });
+        }
+      }
+      setClientKeys((prev) =>
+        prev.map((k) => (k.id === key.id ? { ...k, enabled: nextEnabled } : k))
+      );
+      setStatusBanner(
+        `${nextEnabled ? "Re-enabled" : "Revoked"} client API key: ${key.name}`
+      );
+    } catch (err) {
+      if (dataSource === "DEMO_FALLBACK" || String(err).includes("fetch")) {
+        setClientKeys((prev) =>
+          prev.map((k) =>
+            k.id === key.id ? { ...k, enabled: nextEnabled } : k
+          )
+        );
+        setStatusBanner(
+          `${nextEnabled ? "Re-enabled" : "Revoked"} client API key: ${key.name}`
+        );
+        return;
+      }
+      alert(
+        `Failed to toggle key status: ${
           err instanceof Error ? err.message : String(err)
         }`
       );
@@ -232,6 +425,136 @@ export default function GatewayDashboardPage() {
     } catch (err) {
       alert(
         `Failed to store encrypted credential: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  // --- MCP Server Handlers ---
+  const handleRegisterMcpServer = async () => {
+    if (!canMutate || !newMcpId.trim() || !newMcpName.trim()) return;
+    try {
+      const created = await apiClient.registerMcpServer({
+        server_id: newMcpId.trim(),
+        name: newMcpName.trim(),
+        transport_type: newMcpTransport,
+        endpoint_url: newMcpUrl.trim() || undefined,
+        timeout_seconds: newMcpTimeout,
+        allow_local_network: true,
+      });
+      setMcpServers((prev) => [created, ...(prev || [])]);
+      setNewMcpId("");
+      setNewMcpName("");
+      setNewMcpUrl("");
+      setStatusBanner(`Registered MCP Server: ${created.name}`);
+    } catch (err) {
+      alert(
+        `Failed to register MCP server: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleSyncMcpTools = async (serverId: string) => {
+    setSyncingMcpId(serverId);
+    try {
+      const res = await apiClient.syncMcpServerTools(serverId);
+      const [updatedServers, updatedTools] = await Promise.all([
+        apiClient.fetchMcpServers(),
+        apiClient.fetchTools(),
+      ]);
+      setMcpServers(updatedServers);
+      setTools(updatedTools);
+      setStatusBanner(
+        `Synced ${res.synced_count} tool(s) from MCP server "${serverId}"`
+      );
+    } catch (err) {
+      alert(
+        `Failed to sync tools from MCP server: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    } finally {
+      setSyncingMcpId(null);
+    }
+  };
+
+  const handleDeleteMcpServer = async (serverId: string) => {
+    if (!canMutate) return;
+    if (
+      !window.confirm(
+        `Are you sure you want to disconnect and delete MCP server "${serverId}"? Any tools synced from this server will be removed.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await apiClient.unregisterMcpServer(serverId);
+      setMcpServers((prev) => prev.filter((s) => s.server_id !== serverId));
+      const updatedTools = await apiClient.fetchTools();
+      setTools(updatedTools);
+      setStatusBanner(`Disconnected MCP server: ${serverId}`);
+    } catch (err) {
+      alert(
+        `Failed to delete MCP server: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  // --- Custom Provider Handlers ---
+  const handleRegisterCustomProvider = async () => {
+    if (
+      !canMutate ||
+      !newCustomProvId.trim() ||
+      !newCustomProvName.trim() ||
+      !newCustomProvBaseUrl.trim()
+    ) {
+      return;
+    }
+    try {
+      const created = await apiClient.registerCustomProvider({
+        provider_id: newCustomProvId.trim(),
+        display_name: newCustomProvName.trim(),
+        base_url: newCustomProvBaseUrl.trim(),
+        adapter_type: "custom_http",
+        allow_local_network: newCustomProvAllowLocal,
+      });
+      setProviders((prev) => [created, ...(prev || [])]);
+      setNewCustomProvId("");
+      setNewCustomProvName("");
+      setNewCustomProvBaseUrl("");
+      setStatusBanner(
+        `Registered custom REST AI provider: ${created.display_name}`
+      );
+    } catch (err) {
+      alert(
+        `Failed to register custom provider: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleDeleteCustomProvider = async (providerId: string) => {
+    if (!canMutate) return;
+    if (
+      !window.confirm(
+        `Are you sure you want to unregister custom provider "${providerId}"?`
+      )
+    ) {
+      return;
+    }
+    try {
+      await apiClient.unregisterCustomProvider(providerId);
+      setProviders((prev) => prev.filter((p) => p.provider_id !== providerId));
+      setStatusBanner(`Unregistered custom provider: ${providerId}`);
+    } catch (err) {
+      alert(
+        `Failed to unregister custom provider: ${
           err instanceof Error ? err.message : String(err)
         }`
       );
@@ -815,16 +1138,185 @@ export default function GatewayDashboardPage() {
                     Generate Client Key
                   </button>
                 </div>
+                {/* Interactive Modal Popup for Newly Issued Key */}
                 {newlyIssuedRawKey && (
-                  <div className="p-3 rounded bg-emerald-950/60 border border-emerald-700 text-xs">
-                    <span className="font-bold text-emerald-300">
-                      Copy Key Now (Shown Once):{" "}
-                    </span>
-                    <code className="font-mono text-white">
-                      {newlyIssuedRawKey}
-                    </code>
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+                    <div className="bg-[#111827] border border-gray-700 max-w-lg w-full p-6 rounded-xl shadow-2xl space-y-4">
+                      <div className="flex items-center justify-between pb-2 border-b border-gray-800">
+                        <div className="flex items-center gap-2 text-emerald-400 font-bold text-lg">
+                          <Key className="w-5 h-5" />
+                          <span>Client Gateway API Key Issued</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setNewlyIssuedRawKey(null);
+                            setCopiedKey(false);
+                          }}
+                          className="text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition"
+                          title="Close dialog"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-amber-950/50 border border-amber-600/60 flex gap-3 text-amber-200 text-xs leading-relaxed">
+                        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-semibold block text-amber-300 mb-1">
+                            Save this key now — It will never be shown again!
+                          </span>
+                          For security, the gateway only stores a one-way cryptographic SHA-256 hash. Once you close this pop-up, you will not be able to retrieve or view this secret key again.
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold uppercase text-gray-400">
+                          Secret API Key
+                        </label>
+                        <div className="flex items-center gap-2 bg-gray-950 p-2.5 rounded-lg border border-gray-800">
+                          <code className="flex-1 font-mono text-xs text-emerald-400 break-all select-all">
+                            {newlyIssuedRawKey}
+                          </code>
+                          <button
+                            onClick={() => void handleCopyRawKey()}
+                            className="flex items-center gap-1.5 rounded bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white shrink-0 transition"
+                          >
+                            {copiedKey ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" />
+                                Copied!
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                Copy Key
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 flex justify-end">
+                        <button
+                          onClick={() => {
+                            setNewlyIssuedRawKey(null);
+                            setCopiedKey(false);
+                          }}
+                          className="rounded bg-blue-600 hover:bg-blue-500 px-5 py-2 text-sm font-medium text-white transition"
+                        >
+                          I have saved my key (Close)
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Modal Dialog for Editing an Existing Key */}
+            {editingClientKey && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+                <div className="bg-[#111827] border border-gray-700 max-w-md w-full p-6 rounded-xl shadow-2xl space-y-4">
+                  <div className="flex items-center justify-between pb-2 border-b border-gray-800">
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Edit3 className="w-5 h-5 text-blue-400" />
+                      Edit Client API Key
+                    </h3>
+                    <button
+                      onClick={() => setEditingClientKey(null)}
+                      className="text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-3 text-sm">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-400 mb-1">
+                        Key Name / Service
+                      </label>
+                      <input
+                        type="text"
+                        value={editKeyName}
+                        onChange={(e) => setEditKeyName(e.target.value)}
+                        className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-400 mb-1">
+                        Role & Permissions
+                      </label>
+                      <select
+                        value={editKeyRole}
+                        onChange={(e) => setEditKeyRole(e.target.value)}
+                        className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-sm"
+                      >
+                        <option value="CLIENT">CLIENT (Standard Data Plane)</option>
+                        <option value="OPERATOR">OPERATOR (Ops & Management)</option>
+                        <option value="READ_ONLY">READ_ONLY (Metrics & Audit)</option>
+                        <option value="SUPER_ADMIN">SUPER_ADMIN (Full Control)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-400 mb-1">
+                        Rate Limit (RPM)
+                      </label>
+                      <input
+                        type="number"
+                        value={editKeyRpm}
+                        onChange={(e) => setEditKeyRpm(Number(e.target.value))}
+                        className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-400 mb-1">
+                        Monthly Budget ($ USD, optional)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        placeholder="Leave blank for unlimited"
+                        value={editKeyBudget}
+                        onChange={(e) => setEditKeyBudget(e.target.value)}
+                        className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-sm"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <input
+                        type="checkbox"
+                        id="editEnabledCheck"
+                        checked={editKeyEnabled}
+                        onChange={(e) => setEditKeyEnabled(e.target.checked)}
+                        className="rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-0"
+                      />
+                      <label
+                        htmlFor="editEnabledCheck"
+                        className="text-xs font-medium text-gray-300 cursor-pointer"
+                      >
+                        Key is Enabled (Active)
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="pt-3 flex justify-end gap-2 border-t border-gray-800">
+                    <button
+                      onClick={() => setEditingClientKey(null)}
+                      className="rounded bg-gray-800 hover:bg-gray-700 px-4 py-1.5 text-xs font-medium text-gray-300 transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => void handleSaveEditKey()}
+                      className="rounded bg-blue-600 hover:bg-blue-500 px-4 py-1.5 text-xs font-medium text-white transition"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -836,13 +1328,15 @@ export default function GatewayDashboardPage() {
                     <th className="py-2">Key Prefix</th>
                     <th className="py-2">Role</th>
                     <th className="py-2">RPM Limit</th>
+                    <th className="py-2">Monthly Budget</th>
                     <th className="py-2">Status</th>
+                    {canMutate && <th className="py-2 text-right">Actions</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
                   {clientKeys.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-6 text-center text-xs text-gray-500">
+                      <td colSpan={canMutate ? 7 : 6} className="py-6 text-center text-xs text-gray-500">
                         No client API keys issued yet. Generate a client key above or via POST /api/v1/admin/client-keys.
                       </td>
                     </tr>
@@ -855,9 +1349,45 @@ export default function GatewayDashboardPage() {
                         </td>
                         <td className="py-2 font-mono text-xs">{k.role}</td>
                         <td className="py-2">{k.rate_limit_rpm} RPM</td>
+                        <td className="py-2 text-xs text-gray-300">
+                          {k.monthly_budget_usd !== null && k.monthly_budget_usd !== undefined
+                            ? `$${k.monthly_budget_usd.toFixed(2)}`
+                            : "Unlimited"}
+                        </td>
                         <td className="py-2">
                           {renderBadge(k.enabled ? "ACTIVE" : "REVOKED")}
                         </td>
+                        {canMutate && (
+                          <td className="py-2 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleOpenEditKey(k)}
+                                className="p-1.5 rounded hover:bg-gray-800 text-blue-400 hover:text-blue-300 transition"
+                                title="Edit client key"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => void handleToggleClientKey(k)}
+                                className={`px-2 py-0.5 rounded text-xs font-medium transition ${
+                                  k.enabled
+                                    ? "bg-amber-950/60 border border-amber-700 text-amber-300 hover:bg-amber-900/60"
+                                    : "bg-emerald-950/60 border border-emerald-700 text-emerald-300 hover:bg-emerald-900/60"
+                                }`}
+                                title={k.enabled ? "Revoke key" : "Enable key"}
+                              >
+                                {k.enabled ? "Revoke" : "Enable"}
+                              </button>
+                              <button
+                                onClick={() => void handleDeleteClientKey(k)}
+                                className="p-1.5 rounded hover:bg-gray-800 text-rose-400 hover:text-rose-300 transition"
+                                title="Delete client key"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))
                   )}
@@ -995,30 +1525,160 @@ export default function GatewayDashboardPage() {
         {/* 10. MCP CONNECTIONS */}
         {activeSection === "mcp_servers" && (
           <section className="space-y-6">
-            <h2 className="text-2xl font-bold">
-              10. Model Context Protocol (MCP) Server Connections
-            </h2>
-            <div className="grid grid-cols-1 gap-4">
-              {(mcpServers || []).map((s) => (
-                <div
-                  key={s.server_id}
-                  className="p-4 rounded-lg bg-[#111827] border border-gray-800 flex items-center justify-between"
-                >
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <Plug className="w-6 h-6 text-blue-400" />
+                  10. Model Context Protocol (MCP) Server Connections
+                </h2>
+                <p className="text-xs text-gray-400 mt-1">
+                  Connect external MCP servers (JSON-RPC 2.0 / SSE) to dynamically discover and expose live tools to language models.
+                </p>
+              </div>
+            </div>
+
+            {canMutate && (
+              <div className="p-5 rounded-lg bg-[#111827] border border-gray-800 space-y-4">
+                <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
+                  <PlusCircle className="w-4 h-4 text-emerald-400" />
+                  Connect New MCP Server
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
                   <div>
-                    <div className="font-semibold">{s.name}</div>
-                    <div className="text-xs text-gray-400 font-mono">
-                      ID: {s.server_id} • Transport: {s.transport} •{" "}
-                      {s.endpoint_url || "in-memory"}
-                    </div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Server ID (Slug)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. github-mcp"
+                      value={newMcpId}
+                      onChange={(e) => setNewMcpId(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs font-mono text-white"
+                    />
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-gray-300">
-                      {s.discovered_tools_count} tools synced
-                    </span>
-                    {renderBadge(s.health_status)}
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Display Name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. GitHub Dev Tools"
+                      value={newMcpName}
+                      onChange={(e) => setNewMcpName(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Transport Type
+                    </label>
+                    <select
+                      value={newMcpTransport}
+                      onChange={(e) => setNewMcpTransport(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="http_jsonrpc">HTTP (JSON-RPC 2.0)</option>
+                      <option value="sse">SSE (Server-Sent Events)</option>
+                      <option value="in_memory">In-Memory</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Timeout (seconds)
+                    </label>
+                    <input
+                      type="number"
+                      value={newMcpTimeout}
+                      onChange={(e) => setNewMcpTimeout(Number(e.target.value))}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs text-white"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2 lg:col-span-3">
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Endpoint URL
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. http://localhost:3001/mcp or https://mcp.internal.lan/sse"
+                      value={newMcpUrl}
+                      onChange={(e) => setNewMcpUrl(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs font-mono text-white"
+                    />
+                  </div>
+
+                  <div className="flex items-end">
+                    <button
+                      onClick={() => void handleRegisterMcpServer()}
+                      className="w-full rounded bg-blue-600 hover:bg-blue-500 py-1.5 px-4 text-xs font-medium text-white transition flex items-center justify-center gap-1.5"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      Connect Server
+                    </button>
                   </div>
                 </div>
-              ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4">
+              {mcpServers.length === 0 ? (
+                <div className="p-8 rounded-lg bg-[#111827] border border-gray-800 text-center text-xs text-gray-500">
+                  No MCP servers currently connected. Use the form above or call POST /api/v1/mcp/servers.
+                </div>
+              ) : (
+                mcpServers.map((s) => (
+                  <div
+                    key={s.server_id}
+                    className="p-5 rounded-lg bg-[#111827] border border-gray-800 flex flex-wrap items-center justify-between gap-4"
+                  >
+                    <div>
+                      <div className="font-semibold text-white flex items-center gap-2">
+                        <Server className="w-4 h-4 text-blue-400" />
+                        {s.name}
+                      </div>
+                      <div className="text-xs text-gray-400 font-mono mt-1">
+                        ID: <span className="text-gray-200">{s.server_id}</span> • Transport:{" "}
+                        <span className="text-emerald-400">{s.transport}</span> •{" "}
+                        <span className="text-gray-300">{s.endpoint_url || "in-memory"}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="px-2.5 py-1 rounded bg-gray-900 border border-gray-700 text-xs text-gray-300">
+                        {s.discovered_tools_count} tool(s) synced
+                      </span>
+                      {renderBadge(s.health_status)}
+
+                      {canMutate && (
+                        <div className="flex items-center gap-2 ml-2">
+                          <button
+                            onClick={() => void handleSyncMcpTools(s.server_id)}
+                            disabled={syncingMcpId === s.server_id}
+                            className="flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-950/70 border border-emerald-700 text-emerald-300 hover:bg-emerald-900/70 text-xs font-medium transition disabled:opacity-50"
+                            title="Discover tools and sync into Gateway Tool Registry"
+                          >
+                            <RefreshCw
+                              className={`w-3.5 h-3.5 ${
+                                syncingMcpId === s.server_id ? "animate-spin" : ""
+                              }`}
+                            />
+                            {syncingMcpId === s.server_id ? "Syncing..." : "Sync Tools"}
+                          </button>
+                          <button
+                            onClick={() => void handleDeleteMcpServer(s.server_id)}
+                            className="p-1.5 rounded hover:bg-gray-800 text-rose-400 hover:text-rose-300 transition"
+                            title="Disconnect and delete MCP server"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </section>
         )}
@@ -1026,22 +1686,152 @@ export default function GatewayDashboardPage() {
         {/* 11. CUSTOM INTEGRATIONS */}
         {activeSection === "custom_integrations" && (
           <section className="space-y-6">
-            <h2 className="text-2xl font-bold">
-              11. Custom Provider & Protocol Plugins
-            </h2>
-            <div className="p-5 rounded-lg bg-[#111827] border border-gray-800 space-y-3 text-sm">
-              <p className="text-gray-300">
-                Developers can register custom REST AI services via{" "}
-                <code className="font-mono text-blue-400">
-                  POST /api/v1/providers/custom
-                </code>{" "}
-                and invoke them through{" "}
-                <code className="font-mono text-blue-400">
-                  POST /v1/custom/&#123;provider_id&#125;
-                </code>{" "}
-                with SSRF protection and configurable JSONPath request/response
-                transformations.
-              </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <Globe className="w-6 h-6 text-purple-400" />
+                  11. Custom Provider & Protocol Plugins
+                </h2>
+                <p className="text-xs text-gray-400 mt-1">
+                  Connect self-hosted inference servers (vLLM, Ollama, TGI, SGLang) or internal company AI microservices directly into the gateway.
+                </p>
+              </div>
+            </div>
+
+            {canMutate && (
+              <div className="p-5 rounded-lg bg-[#111827] border border-gray-800 space-y-4">
+                <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
+                  <PlusCircle className="w-4 h-4 text-emerald-400" />
+                  Register Custom REST AI Provider
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Provider Slug
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. vllm-cluster"
+                      value={newCustomProvId}
+                      onChange={(e) => setNewCustomProvId(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs font-mono text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Display Name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. On-Premises vLLM Service"
+                      value={newCustomProvName}
+                      onChange={(e) => setNewCustomProvName(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs text-white"
+                    />
+                  </div>
+
+                  <div className="lg:col-span-1">
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Base URL (OpenAI-compatible or REST)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. http://localhost:8000/v1"
+                      value={newCustomProvBaseUrl}
+                      onChange={(e) => setNewCustomProvBaseUrl(e.target.value)}
+                      className="w-full rounded bg-gray-900 border border-gray-700 px-3 py-1.5 text-xs font-mono text-white"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 md:col-span-2 pt-2">
+                    <input
+                      type="checkbox"
+                      id="allowLocalNetworkCheck"
+                      checked={newCustomProvAllowLocal}
+                      onChange={(e) => setNewCustomProvAllowLocal(e.target.checked)}
+                      className="rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-0"
+                    />
+                    <label
+                      htmlFor="allowLocalNetworkCheck"
+                      className="text-xs text-gray-300 cursor-pointer"
+                    >
+                      Allow local/private network addresses (RFC1918 / localhost / Docker network)
+                    </label>
+                  </div>
+
+                  <div className="flex items-end justify-end md:col-span-1 pt-2">
+                    <button
+                      onClick={() => void handleRegisterCustomProvider()}
+                      className="w-full rounded bg-blue-600 hover:bg-blue-500 py-1.5 px-4 text-xs font-medium text-white transition flex items-center justify-center gap-1.5"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      Register Provider
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="p-5 rounded-lg bg-[#111827] border border-gray-800 space-y-4">
+              <h3 className="text-base font-semibold text-white">
+                Active Custom Provider Adapters
+              </h3>
+              <div className="space-y-3">
+                {providers.filter((p) => p.adapter_type === "custom_http" || !["openai", "anthropic", "gemini", "groq", "ollama", "openrouter", "elevenlabs"].includes(p.provider_id)).length === 0 ? (
+                  <p className="text-xs text-gray-500 py-4 text-center">
+                    No custom AI providers registered. Register one above to connect your local or private cluster.
+                  </p>
+                ) : (
+                  providers
+                    .filter((p) => p.adapter_type === "custom_http" || !["openai", "anthropic", "gemini", "groq", "ollama", "openrouter", "elevenlabs"].includes(p.provider_id))
+                    .map((p) => (
+                      <div
+                        key={p.provider_id}
+                        className="p-4 rounded-lg bg-gray-950 border border-gray-800 flex flex-wrap items-center justify-between gap-4"
+                      >
+                        <div>
+                          <div className="font-semibold text-white flex items-center gap-2">
+                            <Globe className="w-4 h-4 text-purple-400" />
+                            {p.display_name}
+                          </div>
+                          <div className="text-xs text-gray-400 font-mono mt-1">
+                            Slug: <span className="text-gray-200">{p.provider_id}</span> • Base URL:{" "}
+                            <span className="text-blue-400">{p.base_url}</span>
+                          </div>
+                          <div className="text-xs text-gray-500 font-mono mt-1">
+                            Endpoints: /v1/custom/{p.provider_id} & /v1/native/{p.provider_id}/...
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          {renderBadge(p.health_status || "HEALTHY")}
+                          {canMutate && (
+                            <button
+                              onClick={() => void handleDeleteCustomProvider(p.provider_id)}
+                              className="p-1.5 rounded hover:bg-gray-800 text-rose-400 hover:text-rose-300 transition"
+                              title="Unregister custom provider"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-lg bg-gray-900/50 border border-gray-800 text-xs text-gray-300 space-y-2">
+              <span className="font-semibold text-white block">How to query custom providers:</span>
+              <ul className="list-disc list-inside space-y-1 text-gray-400 font-mono">
+                <li>
+                  Unified Custom Protocol: <span className="text-blue-300">POST /v1/custom/&#123;provider_id&#125;</span>
+                </li>
+                <li>
+                  Lossless Native Passthrough: <span className="text-blue-300">POST /v1/native/&#123;provider_id&#125;/chat/completions</span>
+                </li>
+              </ul>
             </div>
           </section>
         )}

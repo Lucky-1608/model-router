@@ -40,6 +40,7 @@ export interface AnalyticsOverview {
 export interface ProviderSummary {
   provider_id: string;
   display_name: string;
+  adapter_type?: string;
   enabled: boolean;
   base_url: string;
   supported_protocols: string[];

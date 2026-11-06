@@ -90,7 +90,23 @@ def test_admin_client_api_key_lifecycle_rbac_and_hash_only_storage(
         assert "key_hash" not in items[0]
         assert raw_key not in list_resp.text
 
-        # 5. Revoke and delete key
+        # 5. Update client key (name, RPM, role, budget)
+        update_resp = client.put(
+            f"/api/v1/admin/client-keys/{key_id}",
+            headers={"X-Gateway-Admin-Token": "phase7-admin-secret-token"},
+            json={
+                "name": "Production Backend Service Updated",
+                "rate_limit_rpm": 2400,
+                "monthly_budget_usd": 500.0,
+            },
+        )
+        assert update_resp.status_code == 200
+        updated = update_resp.json()
+        assert updated["name"] == "Production Backend Service Updated"
+        assert updated["rate_limit_rpm"] == 2400
+        assert updated["monthly_budget_usd"] == 500.0
+
+        # 6. Revoke and delete key
         revoke_resp = client.post(
             f"/api/v1/admin/client-keys/{key_id}/revoke",
             headers={"X-Gateway-Admin-Token": "phase7-admin-secret-token"},

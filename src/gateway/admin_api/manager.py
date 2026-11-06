@@ -14,6 +14,7 @@ from gateway.admin_api.models import (
     ClientApiKeyCreatedResponse,
     ClientApiKeyCreateRequest,
     ClientApiKeyORM,
+    ClientApiKeyUpdateRequest,
     ClientApiKeyView,
     ControlPlaneEntityORM,
     SystemSettingsView,
@@ -149,6 +150,38 @@ class AdminControlPlaneManager:
             if row is None:
                 raise ResourceNotFoundError(f"Client API key {key_id!r} not found")
             await session.delete(row)
+
+    async def update_client_key(
+        self, key_id: str, payload: ClientApiKeyUpdateRequest
+    ) -> ClientApiKeyView:
+        try:
+            uid = uuid.UUID(key_id)
+        except (ValueError, AttributeError) as exc:
+            raise ResourceNotFoundError(f"Client API key {key_id!r} not found") from exc
+
+        async with self._db_manager.session() as session:
+            row = await session.get(ClientApiKeyORM, uid)
+            if row is None:
+                raise ResourceNotFoundError(f"Client API key {key_id!r} not found")
+
+            if payload.name is not None:
+                row.name = payload.name
+            if payload.role is not None:
+                row.role = payload.role
+            if payload.allowed_providers is not None:
+                row.allowed_providers_csv = ",".join(payload.allowed_providers)
+            if payload.allowed_tools is not None:
+                row.allowed_tools_csv = ",".join(payload.allowed_tools)
+            if payload.rate_limit_rpm is not None:
+                row.rate_limit_rpm = payload.rate_limit_rpm
+            if payload.monthly_budget_usd is not None:
+                row.monthly_budget_usd = payload.monthly_budget_usd
+            if payload.enabled is not None:
+                row.enabled = payload.enabled
+
+            await session.flush()
+            await session.refresh(row)
+            return self._to_view(row)
 
     async def persist_entity(
         self, entity_type: str, entity_id: str, payload_json: str

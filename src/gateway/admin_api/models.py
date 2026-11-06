@@ -54,6 +54,18 @@ class ClientApiKeyCreateRequest(BaseModel):
     monthly_budget_usd: float | None = Field(default=None, ge=0.0)
 
 
+class ClientApiKeyUpdateRequest(BaseModel):
+    """Payload to update an existing Client Gateway API Key."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    role: str | None = Field(default=None, pattern=r"^(CLIENT|OPERATOR|READ_ONLY|SUPER_ADMIN)$")
+    allowed_providers: list[str] | None = None
+    allowed_tools: list[str] | None = None
+    rate_limit_rpm: int | None = Field(default=None, ge=1, le=100000)
+    monthly_budget_usd: float | None = Field(default=None, ge=0.0)
+    enabled: bool | None = None
+
+
 class ClientApiKeyView(BaseModel):
     """Redacted public view of a Client Gateway API Key (never exposes full secret after creation)."""
 

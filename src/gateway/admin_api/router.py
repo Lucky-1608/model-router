@@ -10,6 +10,7 @@ from gateway.admin_api.manager import AdminControlPlaneManager
 from gateway.admin_api.models import (
     ClientApiKeyCreatedResponse,
     ClientApiKeyCreateRequest,
+    ClientApiKeyUpdateRequest,
     ClientApiKeyView,
     SystemSettingsView,
 )
@@ -62,6 +63,20 @@ async def revoke_client_api_key(
     _auth: tuple[str, str] = Depends(require_admin_access),
 ) -> ClientApiKeyView:
     return await _get_admin_manager(request).revoke_client_key(key_id)
+
+
+@admin_control_router.put(
+    "/client-keys/{key_id}",
+    response_model=ClientApiKeyView,
+    summary="Update an existing Client Gateway API Key",
+)
+async def update_client_api_key(
+    request: Request,
+    key_id: str,
+    payload: ClientApiKeyUpdateRequest,
+    _auth: tuple[str, str] = Depends(require_admin_access),
+) -> ClientApiKeyView:
+    return await _get_admin_manager(request).update_client_key(key_id, payload)
 
 
 @admin_control_router.delete(

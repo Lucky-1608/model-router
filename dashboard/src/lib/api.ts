@@ -55,7 +55,18 @@ export class GatewayApiClient {
       const text = await res.text();
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
-    return (await res.json()) as T;
+    if (res.status === 204) {
+      return undefined as T;
+    }
+    const text = await res.text();
+    if (!text || !text.trim()) {
+      return undefined as T;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return text as unknown as T;
+    }
   }
 
   async fetchOverview(): Promise<AnalyticsOverview> {
@@ -170,6 +181,32 @@ export class GatewayApiClient {
     );
   }
 
+  async updateClientKey(
+    keyId: string,
+    payload: {
+      name?: string;
+      role?: string;
+      allowed_providers?: string[];
+      rate_limit_rpm?: number;
+      monthly_budget_usd?: number | null;
+      enabled?: boolean;
+    }
+  ): Promise<ClientApiKeyView> {
+    return this.request<ClientApiKeyView>(
+      `/api/v1/admin/client-keys/${keyId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async deleteClientKey(keyId: string): Promise<void> {
+    await this.request<void>(`/api/v1/admin/client-keys/${keyId}`, {
+      method: "DELETE",
+    });
+  }
+
   async fetchRequestLogs(limit = 50): Promise<UsageRecordView[]> {
     const res = await this.request<
       UsageRecordView[] | { data?: UsageRecordView[]; requests?: UsageRecordView[] }
@@ -212,6 +249,62 @@ export class GatewayApiClient {
     >("/api/v1/mcp/servers");
     if (Array.isArray(res)) return res;
     return res.servers ?? res.data ?? [];
+  }
+
+  async registerMcpServer(payload: {
+    server_id: string;
+    name: string;
+    transport_type: string;
+    endpoint_url?: string;
+    timeout_seconds?: number;
+    allow_local_network?: boolean;
+  }): Promise<MCPServerView> {
+    return this.request<MCPServerView>("/api/v1/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async syncMcpServerTools(
+    serverId: string
+  ): Promise<{ server_id: string; synced_count: number; tools: unknown[] }> {
+    return this.request<{
+      server_id: string;
+      synced_count: number;
+      tools: unknown[];
+    }>(`/api/v1/mcp/servers/${serverId}/sync-tools`, {
+      method: "POST",
+    });
+  }
+
+  async unregisterMcpServer(serverId: string): Promise<void> {
+    await this.request<void>(`/api/v1/mcp/servers/${serverId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async registerCustomProvider(payload: {
+    provider_id: string;
+    display_name: string;
+    base_url: string;
+    adapter_type?: string;
+    allow_local_network?: boolean;
+    custom_settings?: Record<string, unknown>;
+  }): Promise<ProviderSummary> {
+    return this.request<ProviderSummary>("/api/v1/providers/custom", {
+      method: "POST",
+      body: JSON.stringify({
+        adapter_type: "custom_http",
+        allow_local_network: true,
+        ...payload,
+      }),
+    });
+  }
+
+  async unregisterCustomProvider(providerId: string): Promise<void> {
+    await this.request<void>(`/api/v1/providers/custom/${providerId}`, {
+      method: "DELETE",
+    });
   }
 
   async fetchSystemSettings(): Promise<SystemSettingsView> {
